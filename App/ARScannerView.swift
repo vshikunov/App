@@ -1,6 +1,7 @@
 import SwiftUI
 import RealityKit
 import ARKit
+import CoreVideo
 import simd
 
 struct ARScannerView: UIViewRepresentable {
@@ -42,12 +43,25 @@ final class ARScannerController: NSObject, ARSessionDelegate {
     private let anchorQueue = DispatchQueue(label: "DimensionalScanner.ARMeshAnchors")
     private var meshAnchors: [UUID: ARMeshAnchor] = [:]
     private var captureActive = false
+
+    /// Crop center in world space.
     private var objectCenterWorld: SIMD3<Float>?
+
+    /// Output/reference origin. In 6-point mode this is the captured ground-zero datum.
+    private var objectReferenceOriginWorld: SIMD3<Float>?
+
+    /// Columns are local X, local Y/up, local Z/depth axes in world coordinates.
     private var partBasisWorld = simd_float3x3(
         SIMD3<Float>(1, 0, 0),
         SIMD3<Float>(0, 1, 0),
         SIMD3<Float>(0, 0, 1)
     )
+
+    /// Stored half extents for the automatically detected 6-point object volume, in meters.
+    private var sixPointHalfExtentsM: SIMD3<Float>?
+
+    /// Drops flat table/floor mesh immediately at the zero plane when 6-point mode is active.
+    private var groundRemovalHeightM: Float = 0.002
 
     init(arView: ARView, model: ScannerViewModel) {
         self.arView = arView
@@ -69,27 +83,35 @@ final class ARScannerController: NSObject, ARSessionDelegate {
         let configuration = ARWorldTrackingConfiguration()
         configuration.planeDetection = [.horizontal, .vertical]
         configuration.environmentTexturing = .automatic
+
         if ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification) {
             configuration.sceneReconstruction = .meshWithClassification
         } else {
             configuration.sceneReconstruction = .mesh
         }
 
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
+            configuration.frameSemantics.insert(.smoothedSceneDepth)
+        } else if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+            configuration.frameSemantics.insert(.sceneDepth)
+        }
+
         arView?.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
         setMeshOverlayVisible(showMeshOverlay)
-        postStatus("ARKit mesh reconstruction is running. Aim at the object and tap Set Center.")
+        postStatus("ARKit mesh reconstruction is running. Aim the reticle at ground zero and capture point 1.")
     }
 
     @MainActor
-func resetSession() {
-    anchorQueue.sync {
-        meshAnchors.removeAll()
-        captureActive = false
+    func resetSession() {
+        anchorQueue.sync {
+            meshAnchors.removeAll()
+            captureActive = false
+        }
+        objectCenterWorld = nil
+        objectReferenceOriginWorld = nil
+        sixPointHalfExtentsM = nil
+        startSession(showMeshOverlay: model?.showMeshOverlay ?? true)
     }
-
-    objectCenterWorld = nil
-    startSession(showMeshOverlay: model?.showMeshOverlay ?? true)
-}
 
     func setMeshOverlayVisible(_ visible: Bool) {
         guard let arView else { return }
@@ -100,22 +122,127 @@ func resetSession() {
         }
     }
 
+    @MainActor
     func setObjectCenterFromScreenCenter() {
-        guard let arView else { return }
+        guard let point = captureWorldPointFromScreenCenter() else {
+            postStatus("Could not set center. Aim at a visible surface and try again.")
+            return
+        }
+
+        objectCenterWorld = point
+        objectReferenceOriginWorld = point
+        sixPointHalfExtentsM = nil
+        updatePartBasisFromCurrentCamera()
+        postStatus("Manual object center set. For better object detection, use the 6-point reference workflow.")
+    }
+
+    @MainActor
+    func captureWorldPointFromScreenCenter() -> SIMD3<Float>? {
+        guard let arView else { return nil }
+
+        if let depthPoint = worldPointFromSceneDepthAtScreenCenter(in: arView) {
+            return depthPoint
+        }
+
         let screenPoint = CGPoint(x: arView.bounds.midX, y: arView.bounds.midY)
         let raycastResults = arView.raycast(from: screenPoint, allowing: .estimatedPlane, alignment: .any)
-
         if let first = raycastResults.first {
-            objectCenterWorld = first.worldTransform.translationVector
-        } else if let frame = arView.session.currentFrame {
+            return first.worldTransform.translationVector
+        }
+
+        if let frame = arView.session.currentFrame {
             let cameraTransform = frame.camera.transform
             let cameraPosition = cameraTransform.translationVector
             let forward = -cameraTransform.zAxis
-            objectCenterWorld = cameraPosition + forward * 0.60
+            return cameraPosition + simd_normalize(forward) * 0.60
         }
 
-        updatePartBasisFromCurrentCamera()
-        postStatus("Object center set. The crop box is aligned to the phone view and gravity.")
+        return nil
+    }
+
+    @MainActor
+    func applySixPointReference(points: [SIMD3<Float>], paddingMM: Double) -> SixPointReferenceSummary? {
+        guard points.count >= 6 else { return nil }
+
+        let ground = points[0]
+        let top = points[1]
+        let boundaryPoints = Array(points[2..<6])
+        let rawUp = top - ground
+        let heightM = simd_length(rawUp)
+        guard heightM > 0.005 else { return nil }
+
+        let upAxis = simd_normalize(rawUp)
+        let projectedBoundary = boundaryPoints.map { point in
+            point - upAxis * simd_dot(point - ground, upAxis)
+        }
+
+        var xAxis = farthestPairAxis(points: projectedBoundary)
+        if simd_length(xAxis) < 0.0001 {
+            xAxis = cameraRightProjected(perpendicularTo: upAxis)
+        }
+        xAxis = simd_normalize(xAxis - upAxis * simd_dot(xAxis, upAxis))
+
+        var depthAxis = simd_cross(xAxis, upAxis)
+        if simd_length(depthAxis) < 0.0001 {
+            depthAxis = SIMD3<Float>(0, 0, 1)
+        } else {
+            depthAxis = simd_normalize(depthAxis)
+        }
+        xAxis = simd_normalize(simd_cross(upAxis, depthAxis))
+
+        partBasisWorld = simd_float3x3(xAxis, upAxis, depthAxis)
+        objectReferenceOriginWorld = ground
+
+        let planarPoints = boundaryPoints + [ground]
+        let locals = planarPoints.map { localReferenceCoordinate(for: $0, origin: ground) }
+
+        guard let first = locals.first else { return nil }
+        var minX = first.x
+        var maxX = first.x
+        var minZ = first.z
+        var maxZ = first.z
+
+        for local in locals.dropFirst() {
+            minX = min(minX, local.x)
+            maxX = max(maxX, local.x)
+            minZ = min(minZ, local.z)
+            maxZ = max(maxZ, local.z)
+        }
+
+        let paddingM = max(Float(paddingMM / 1000.0), 0.0)
+        let widthM = max(maxX - minX, 0.010)
+        let depthM = max(maxZ - minZ, 0.010)
+        let centerLocal = SIMD3<Float>(
+            (minX + maxX) / 2.0,
+            heightM / 2.0,
+            (minZ + maxZ) / 2.0
+        )
+
+        let centerWorld = ground
+            + xAxis * centerLocal.x
+            + upAxis * centerLocal.y
+            + depthAxis * centerLocal.z
+
+        objectCenterWorld = centerWorld
+        sixPointHalfExtentsM = SIMD3<Float>(
+            widthM / 2.0 + paddingM,
+            heightM / 2.0 + paddingM,
+            depthM / 2.0 + paddingM
+        )
+
+        return SixPointReferenceSummary(
+            widthMM: Double(widthM * 1000.0),
+            heightMM: Double(heightM * 1000.0),
+            depthMM: Double(depthM * 1000.0),
+            paddingMM: paddingMM
+        )
+    }
+
+    @MainActor
+    func clearSixPointReference() {
+        objectCenterWorld = nil
+        objectReferenceOriginWorld = nil
+        sixPointHalfExtentsM = nil
     }
 
     func beginCapture() {
@@ -137,13 +264,15 @@ func resetSession() {
         let anchors = anchorQueue.sync { Array(meshAnchors.values) }
         guard !anchors.isEmpty else { return nil }
 
-        let halfX = Float(volumeXMM / 2000.0)
-        let halfY = Float(volumeYMM / 2000.0)
-        let halfZ = Float(volumeZMM / 2000.0)
-        var output = TriangleMesh()
+        let halfExtents = sixPointHalfExtentsM ?? SIMD3<Float>(
+            Float(volumeXMM / 2000.0),
+            Float(volumeYMM / 2000.0),
+            Float(volumeZMM / 2000.0)
+        )
 
+        var output = TriangleMesh()
         for anchor in anchors {
-            appendCropped(anchor: anchor, center: center, halfX: halfX, halfY: halfY, halfZ: halfZ, into: &output)
+            appendCropped(anchor: anchor, center: center, halfExtents: halfExtents, into: &output)
         }
 
         return output
@@ -152,14 +281,13 @@ func resetSession() {
     private func appendCropped(
         anchor: ARMeshAnchor,
         center: SIMD3<Float>,
-        halfX: Float,
-        halfY: Float,
-        halfZ: Float,
+        halfExtents: SIMD3<Float>,
         into output: inout TriangleMesh
     ) {
         let geometry = anchor.geometry
         let transform = anchor.transform
         let faceCount = geometry.faces.count
+        let usingGroundDatum = objectReferenceOriginWorld != nil && sixPointHalfExtentsM != nil
 
         for faceIndex in 0..<faceCount {
             guard let indices = geometry.triangleIndices(faceIndex: faceIndex) else { continue }
@@ -172,25 +300,37 @@ func resetSession() {
             let world1 = transform.transformPoint(local1)
             let world2 = transform.transformPoint(local2)
 
-            let part0 = worldToPart(world0, center: center)
-            let part1 = worldToPart(world1, center: center)
-            let part2 = worldToPart(world2, center: center)
+            let crop0 = worldToCropCoordinate(world0, center: center)
+            let crop1 = worldToCropCoordinate(world1, center: center)
+            let crop2 = worldToCropCoordinate(world2, center: center)
 
-            guard isInside(part0, halfX: halfX, halfY: halfY, halfZ: halfZ),
-                  isInside(part1, halfX: halfX, halfY: halfY, halfZ: halfZ),
-                  isInside(part2, halfX: halfX, halfY: halfY, halfZ: halfZ) else {
+            guard isInside(crop0, halfExtents: halfExtents),
+                  isInside(crop1, halfExtents: halfExtents),
+                  isInside(crop2, halfExtents: halfExtents) else {
                 continue
             }
 
+            let ref0 = worldToReferenceCoordinate(world0, fallbackCenter: center)
+            let ref1 = worldToReferenceCoordinate(world1, fallbackCenter: center)
+            let ref2 = worldToReferenceCoordinate(world2, fallbackCenter: center)
+
+            if usingGroundDatum {
+                let highestVertex = max(ref0.y, max(ref1.y, ref2.y))
+                let lowestVertex = min(ref0.y, min(ref1.y, ref2.y))
+                if highestVertex < groundRemovalHeightM || lowestVertex < -groundRemovalHeightM {
+                    continue
+                }
+            }
+
             let baseIndex = output.vertices.count
-            output.vertices.append(Vector3D(x: Double(part0.x) * 1000.0, y: Double(part0.y) * 1000.0, z: Double(part0.z) * 1000.0))
-            output.vertices.append(Vector3D(x: Double(part1.x) * 1000.0, y: Double(part1.y) * 1000.0, z: Double(part1.z) * 1000.0))
-            output.vertices.append(Vector3D(x: Double(part2.x) * 1000.0, y: Double(part2.y) * 1000.0, z: Double(part2.z) * 1000.0))
+            output.vertices.append(Vector3D(x: Double(ref0.x) * 1000.0, y: Double(ref0.y) * 1000.0, z: Double(ref0.z) * 1000.0))
+            output.vertices.append(Vector3D(x: Double(ref1.x) * 1000.0, y: Double(ref1.y) * 1000.0, z: Double(ref1.z) * 1000.0))
+            output.vertices.append(Vector3D(x: Double(ref2.x) * 1000.0, y: Double(ref2.y) * 1000.0, z: Double(ref2.z) * 1000.0))
             output.faces.append(TriangleFace(baseIndex, baseIndex + 1, baseIndex + 2))
         }
     }
 
-    private func worldToPart(_ point: SIMD3<Float>, center: SIMD3<Float>) -> SIMD3<Float> {
+    private func worldToCropCoordinate(_ point: SIMD3<Float>, center: SIMD3<Float>) -> SIMD3<Float> {
         let delta = point - center
         let x = simd_dot(delta, partBasisWorld.columns.0)
         let y = simd_dot(delta, partBasisWorld.columns.1)
@@ -198,8 +338,21 @@ func resetSession() {
         return SIMD3<Float>(x, y, z)
     }
 
-    private func isInside(_ point: SIMD3<Float>, halfX: Float, halfY: Float, halfZ: Float) -> Bool {
-        abs(point.x) <= halfX && abs(point.y) <= halfY && abs(point.z) <= halfZ
+    private func worldToReferenceCoordinate(_ point: SIMD3<Float>, fallbackCenter: SIMD3<Float>) -> SIMD3<Float> {
+        let origin = objectReferenceOriginWorld ?? fallbackCenter
+        return localReferenceCoordinate(for: point, origin: origin)
+    }
+
+    private func localReferenceCoordinate(for point: SIMD3<Float>, origin: SIMD3<Float>) -> SIMD3<Float> {
+        let delta = point - origin
+        let x = simd_dot(delta, partBasisWorld.columns.0)
+        let y = simd_dot(delta, partBasisWorld.columns.1)
+        let z = simd_dot(delta, partBasisWorld.columns.2)
+        return SIMD3<Float>(x, y, z)
+    }
+
+    private func isInside(_ point: SIMD3<Float>, halfExtents: SIMD3<Float>) -> Bool {
+        abs(point.x) <= halfExtents.x && abs(point.y) <= halfExtents.y && abs(point.z) <= halfExtents.z
     }
 
     private func updatePartBasisFromCurrentCamera() {
@@ -221,6 +374,80 @@ func resetSession() {
         }
 
         partBasisWorld = simd_float3x3(right, up, depth)
+        objectReferenceOriginWorld = objectCenterWorld
+    }
+
+    private func farthestPairAxis(points: [SIMD3<Float>]) -> SIMD3<Float> {
+        guard points.count >= 2 else { return SIMD3<Float>(0, 0, 0) }
+        var bestAxis = points[1] - points[0]
+        var bestDistance = simd_length_squared(bestAxis)
+
+        for i in 0..<points.count {
+            for j in (i + 1)..<points.count {
+                let candidate = points[j] - points[i]
+                let distance = simd_length_squared(candidate)
+                if distance > bestDistance {
+                    bestDistance = distance
+                    bestAxis = candidate
+                }
+            }
+        }
+
+        return bestAxis
+    }
+
+    private func cameraRightProjected(perpendicularTo upAxis: SIMD3<Float>) -> SIMD3<Float> {
+        guard let frame = arView?.session.currentFrame else {
+            return SIMD3<Float>(1, 0, 0)
+        }
+        let cameraRight = SIMD3<Float>(
+            frame.camera.transform.columns.0.x,
+            frame.camera.transform.columns.0.y,
+            frame.camera.transform.columns.0.z
+        )
+        let projected = cameraRight - upAxis * simd_dot(cameraRight, upAxis)
+        if simd_length(projected) < 0.0001 {
+            return SIMD3<Float>(1, 0, 0)
+        }
+        return projected
+    }
+
+    @MainActor
+    private func worldPointFromSceneDepthAtScreenCenter(in arView: ARView) -> SIMD3<Float>? {
+        guard let frame = arView.session.currentFrame else { return nil }
+        guard let depthMap = (frame.smoothedSceneDepth ?? frame.sceneDepth)?.depthMap else { return nil }
+
+        CVPixelBufferLockBaseAddress(depthMap, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(depthMap, .readOnly) }
+
+        guard let baseAddress = CVPixelBufferGetBaseAddress(depthMap) else { return nil }
+        let width = CVPixelBufferGetWidth(depthMap)
+        let height = CVPixelBufferGetHeight(depthMap)
+        let rowBytes = CVPixelBufferGetBytesPerRow(depthMap)
+        let centerX = width / 2
+        let centerY = height / 2
+        let radius = 2
+        var samples: [Float] = []
+
+        for y in max(0, centerY - radius)...min(height - 1, centerY + radius) {
+            for x in max(0, centerX - radius)...min(width - 1, centerX + radius) {
+                let offset = y * rowBytes + x * MemoryLayout<Float32>.size
+                let value = baseAddress.advanced(by: offset).assumingMemoryBound(to: Float32.self).pointee
+                let depth = Float(value)
+                if depth.isFinite && depth > 0.05 && depth < 5.0 {
+                    samples.append(depth)
+                }
+            }
+        }
+
+        guard !samples.isEmpty else { return nil }
+        samples.sort()
+        let depth = samples[samples.count / 2]
+
+        let cameraTransform = frame.camera.transform
+        let cameraPosition = cameraTransform.translationVector
+        let forward = -cameraTransform.zAxis
+        return cameraPosition + simd_normalize(forward) * depth
     }
 
     private func postStatus(_ message: String) {
