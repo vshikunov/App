@@ -1,0 +1,44 @@
+# Windows-friendly cloud build configuration.
+# Upload this repository to GitHub/GitLab/Bitbucket, connect it to Codemagic,
+# then edit BUNDLE_ID, APP_STORE_APPLE_ID, and the app_store_connect integration name.
+
+workflows:
+  ios-testflight:
+    name: DimensionalScanner iOS TestFlight
+    max_build_duration: 120
+    instance_type: mac_mini_m2
+    integrations:
+      app_store_connect: dimensional_scanner_key
+    environment:
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.yourname.DimensionalScanner
+      vars:
+        BUNDLE_ID: "com.yourname.DimensionalScanner"
+        XCODE_PROJECT: "DimensionalScanner.xcodeproj"
+        XCODE_SCHEME: "DimensionalScanner"
+        # Find this in App Store Connect > your app > General > App Information > Apple ID.
+        APP_STORE_APPLE_ID: "0000000000"
+      xcode: latest
+    scripts:
+      - name: Run core tests
+        script: |
+          swift test
+      - name: Set up provisioning profile settings on Xcode project
+        script: |
+          xcode-project use-profiles --project "$CM_BUILD_DIR/$XCODE_PROJECT"
+      - name: Build signed IPA
+        script: |
+          xcode-project build-ipa \
+            --project "$CM_BUILD_DIR/$XCODE_PROJECT" \
+            --scheme "$XCODE_SCHEME" \
+            --archive-xcargs "PRODUCT_BUNDLE_IDENTIFIER=$BUNDLE_ID COMPILER_INDEX_STORE_ENABLE=NO"
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+      - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.dSYM
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
+        submit_to_app_store: false

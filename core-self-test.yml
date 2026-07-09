@@ -1,0 +1,32 @@
+name: Core self-test
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test-core:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          swift --version
+          xcodebuild -version
+
+      - name: Run Swift package tests
+        run: swift test
+
+      - name: Generate sample STL and CSV outputs
+        run: swift run CoreSelfTest --out ./ci_self_test_output
+
+      - name: Upload sample outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: dimensional-scanner-core-self-test-output
+          path: ci_self_test_output/

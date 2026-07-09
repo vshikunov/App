@@ -1,0 +1,82 @@
+name: Build signed iPhone IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_id:
+        description: "Unique bundle identifier, e.g. com.yourname.DimensionalScanner"
+        required: true
+        default: "com.yourname.DimensionalScanner"
+      export_method:
+        description: "Use development, ad-hoc, or app-store-connect depending on your provisioning profile"
+        required: true
+        default: "development"
+      upload_to_testflight:
+        description: "Upload the built IPA to TestFlight using App Store Connect API secrets"
+        required: true
+        type: boolean
+        default: false
+
+jobs:
+  build-ipa:
+    runs-on: macos-latest
+    env:
+      BUNDLE_ID: ${{ github.event.inputs.bundle_id }}
+      EXPORT_METHOD: ${{ github.event.inputs.export_method }}
+      DEVELOPMENT_TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM_ID }}
+      BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+      P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+      PROVISION_PROFILE_BASE64: ${{ secrets.PROVISION_PROFILE_BASE64 }}
+      KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Install Apple signing assets
+        run: bash ci/install_signing_assets.sh
+
+      - name: Archive app
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          xcodebuild \
+            -project DimensionalScanner.xcodeproj \
+            -scheme DimensionalScanner \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$PWD/build/DimensionalScanner.xcarchive" \
+            clean archive \
+            CODE_SIGN_STYLE=Manual \
+            DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
+            PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
+            COMPILER_INDEX_STORE_ENABLE=NO
+
+      - name: Export IPA
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -exportArchive \
+            -archivePath "$PWD/build/DimensionalScanner.xcarchive" \
+            -exportOptionsPlist "$PWD/build/ExportOptions.plist" \
+            -exportPath "$PWD/build/export"
+          find build/export -maxdepth 2 -type f -print
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DimensionalScanner-IPA
+          path: build/export/*.ipa
+
+      - name: Upload to TestFlight
+        if: ${{ github.event.inputs.upload_to_testflight == 'true' }}
+        uses: apple-actions/upload-testflight-build@v5.2.1
+        with:
+          app-path: build/export/DimensionalScanner.ipa
+          issuer-id: ${{ vars.APPSTORE_ISSUER_ID }}
+          api-key-id: ${{ vars.APPSTORE_API_KEY_ID }}
+          api-private-key: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+          uses-non-exempt-encryption: 'false'
+          wait-for-processing: 'true'

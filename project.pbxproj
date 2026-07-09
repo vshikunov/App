@@ -1,0 +1,393 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		B51DA1953E3EA72F00B5CA2D /* DimensionalScannerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD745AF3EB96AC7E9C312D46 /* DimensionalScannerApp.swift */; };
+		5B148FE5229A8FAD9803883A /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 07ED26221AC80808A805D841 /* ContentView.swift */; };
+		3ABC9814F563AF2002F3E033 /* ScannerViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEC51A95D5C072623F03CA1A /* ScannerViewModel.swift */; };
+		9C0A445FF58997539F9F78D5 /* ARScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A51DCA52E83680E891A4638D /* ARScannerView.swift */; };
+		8FA1C3A20F4DE551BA286308 /* ScanSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E6765004496C5B537C619E8 /* ScanSettingsView.swift */; };
+		8208FFF75FA9F00C0F555167 /* ToleranceEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D75802D693754010909FCFA /* ToleranceEditorView.swift */; };
+		0266BB34ED00C713B9AE7FF9 /* Vector3D.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC2985818DBE145E972EB0C8 /* Vector3D.swift */; };
+		D4265207321924FBC96D4CB2 /* TriangleMesh.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69E0B6226EB18BAA1F28F308 /* TriangleMesh.swift */; };
+		347C46697D0A34A23B263E82 /* MeshMeasurementCalculator.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB643DAAE308EB3EB61E545B /* MeshMeasurementCalculator.swift */; };
+		49307B52F11781EE2BD95DC5 /* ToleranceSpec.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2837710BEE0F56AA18F09035 /* ToleranceSpec.swift */; };
+		3AC4B3315F479084ACBA3BA1 /* ToleranceAnalyzer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE71F5D2EC09626E186FCD40 /* ToleranceAnalyzer.swift */; };
+		C59973A2BC603F730135B07D /* STLExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = BFC0D9D3C4B1D43B1FDB2A8D /* STLExporter.swift */; };
+		F67FE747C8530EA3E48F7D87 /* CSVExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BBE556322B6993AA907CD76 /* CSVExporter.swift */; };
+		1ABACEFA6F3BCB7E7B801E4F /* MeshFixtures.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7770C956BEA5ADECB1341D0 /* MeshFixtures.swift */; };
+		C922BAF45D313CD0BF588CBB /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = CA19D2310FCE9FA29218C1A1 /* Assets.xcassets */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		34F686D89FE98D7807DD38CB /* DimensionalScanner.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DimensionalScanner.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		DD745AF3EB96AC7E9C312D46 /* DimensionalScannerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DimensionalScannerApp.swift; sourceTree = "<group>"; };
+		07ED26221AC80808A805D841 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		FEC51A95D5C072623F03CA1A /* ScannerViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScannerViewModel.swift; sourceTree = "<group>"; };
+		A51DCA52E83680E891A4638D /* ARScannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ARScannerView.swift; sourceTree = "<group>"; };
+		4E6765004496C5B537C619E8 /* ScanSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanSettingsView.swift; sourceTree = "<group>"; };
+		3D75802D693754010909FCFA /* ToleranceEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToleranceEditorView.swift; sourceTree = "<group>"; };
+		FC2985818DBE145E972EB0C8 /* Vector3D.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Vector3D.swift; sourceTree = "<group>"; };
+		69E0B6226EB18BAA1F28F308 /* TriangleMesh.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TriangleMesh.swift; sourceTree = "<group>"; };
+		FB643DAAE308EB3EB61E545B /* MeshMeasurementCalculator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeshMeasurementCalculator.swift; sourceTree = "<group>"; };
+		2837710BEE0F56AA18F09035 /* ToleranceSpec.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToleranceSpec.swift; sourceTree = "<group>"; };
+		AE71F5D2EC09626E186FCD40 /* ToleranceAnalyzer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToleranceAnalyzer.swift; sourceTree = "<group>"; };
+		BFC0D9D3C4B1D43B1FDB2A8D /* STLExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = STLExporter.swift; sourceTree = "<group>"; };
+		1BBE556322B6993AA907CD76 /* CSVExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CSVExporter.swift; sourceTree = "<group>"; };
+		D7770C956BEA5ADECB1341D0 /* MeshFixtures.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeshFixtures.swift; sourceTree = "<group>"; };
+		CA19D2310FCE9FA29218C1A1 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		EF431FED19380A0D7D5E65CE /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		196738691649AC2E2FD321A6 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		2EB2D8158FC6EF9EB19CB439 = {
+			isa = PBXGroup;
+			children = (
+				A7D8CE70846932FEE851CAD6 /* App */,
+				2291ECD343AC5D5C07D462BA /* DimensionalScannerCore */,
+				1E78B559816E575FC0BDB29C /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A7D8CE70846932FEE851CAD6 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				DD745AF3EB96AC7E9C312D46 /* DimensionalScannerApp.swift */,
+				07ED26221AC80808A805D841 /* ContentView.swift */,
+				FEC51A95D5C072623F03CA1A /* ScannerViewModel.swift */,
+				A51DCA52E83680E891A4638D /* ARScannerView.swift */,
+				4E6765004496C5B537C619E8 /* ScanSettingsView.swift */,
+				3D75802D693754010909FCFA /* ToleranceEditorView.swift */,
+				CA19D2310FCE9FA29218C1A1 /* Assets.xcassets */,
+				EF431FED19380A0D7D5E65CE /* Info.plist */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		2291ECD343AC5D5C07D462BA /* DimensionalScannerCore */ = {
+			isa = PBXGroup;
+			children = (
+				FC2985818DBE145E972EB0C8 /* Vector3D.swift */,
+				69E0B6226EB18BAA1F28F308 /* TriangleMesh.swift */,
+				FB643DAAE308EB3EB61E545B /* MeshMeasurementCalculator.swift */,
+				2837710BEE0F56AA18F09035 /* ToleranceSpec.swift */,
+				AE71F5D2EC09626E186FCD40 /* ToleranceAnalyzer.swift */,
+				BFC0D9D3C4B1D43B1FDB2A8D /* STLExporter.swift */,
+				1BBE556322B6993AA907CD76 /* CSVExporter.swift */,
+				D7770C956BEA5ADECB1341D0 /* MeshFixtures.swift */,
+			);
+			path = Sources/DimensionalScannerCore;
+			sourceTree = "<group>";
+		};
+		1E78B559816E575FC0BDB29C /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				34F686D89FE98D7807DD38CB /* DimensionalScanner.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		0352A6A2FCE048894C87B37E /* DimensionalScanner */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E31BA15CC04B0F0B923553D1 /* Build configuration list for PBXNativeTarget "DimensionalScanner" */;
+			buildPhases = (
+				B0193229F5D633567D732C36 /* Sources */,
+				196738691649AC2E2FD321A6 /* Frameworks */,
+				8B0AD72DF5FB9B933D77B1AB /* Resources */,
+			);
+			buildRules = ();
+			dependencies = ();
+			name = DimensionalScanner;
+			productName = DimensionalScanner;
+			productReference = 34F686D89FE98D7807DD38CB /* DimensionalScanner.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		9E88446A3F44B57E975BE17B /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1600;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					0352A6A2FCE048894C87B37E = {
+						CreatedOnToolsVersion = 16.0;
+					};
+				};
+			};
+			buildConfigurationList = 314425BAD361EE8153704C56 /* Build configuration list for PBXProject "DimensionalScanner" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (en, Base);
+			mainGroup = 2EB2D8158FC6EF9EB19CB439;
+			productRefGroup = 1E78B559816E575FC0BDB29C /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				0352A6A2FCE048894C87B37E /* DimensionalScanner */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		8B0AD72DF5FB9B933D77B1AB /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C922BAF45D313CD0BF588CBB /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		B0193229F5D633567D732C36 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B51DA1953E3EA72F00B5CA2D /* DimensionalScannerApp.swift in Sources */,
+				5B148FE5229A8FAD9803883A /* ContentView.swift in Sources */,
+				3ABC9814F563AF2002F3E033 /* ScannerViewModel.swift in Sources */,
+				9C0A445FF58997539F9F78D5 /* ARScannerView.swift in Sources */,
+				8FA1C3A20F4DE551BA286308 /* ScanSettingsView.swift in Sources */,
+				8208FFF75FA9F00C0F555167 /* ToleranceEditorView.swift in Sources */,
+				0266BB34ED00C713B9AE7FF9 /* Vector3D.swift in Sources */,
+				D4265207321924FBC96D4CB2 /* TriangleMesh.swift in Sources */,
+				347C46697D0A34A23B263E82 /* MeshMeasurementCalculator.swift in Sources */,
+				49307B52F11781EE2BD95DC5 /* ToleranceSpec.swift in Sources */,
+				3AC4B3315F479084ACBA3BA1 /* ToleranceAnalyzer.swift in Sources */,
+				C59973A2BC603F730135B07D /* STLExporter.swift in Sources */,
+				F67FE747C8530EA3E48F7D87 /* CSVExporter.swift in Sources */,
+				1ABACEFA6F3BCB7E7B801E4F /* MeshFixtures.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		BFD315016DE16320F7E2120C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		1D8C0C6B1D22EA8C7669B263 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		75BB3D5A44EA88B6630AB580 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "";
+				DEVELOPMENT_TEAM = "";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = App/Info.plist;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.DimensionalScanner;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		78E9FF212122B0C0397A6DB4 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "";
+				DEVELOPMENT_TEAM = "";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = App/Info.plist;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.DimensionalScanner;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		314425BAD361EE8153704C56 /* Build configuration list for PBXProject "DimensionalScanner" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BFD315016DE16320F7E2120C /* Debug */,
+				1D8C0C6B1D22EA8C7669B263 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		E31BA15CC04B0F0B923553D1 /* Build configuration list for PBXNativeTarget "DimensionalScanner" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				75BB3D5A44EA88B6630AB580 /* Debug */,
+				78E9FF212122B0C0397A6DB4 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+	};
+	rootObject = 9E88446A3F44B57E975BE17B /* Project object */;
+}
