@@ -1,0 +1,86 @@
+solid core_self_test_box
+  facet normal 0 0 -1
+    outer loop
+      vertex -35 -55 -25
+      vertex 35 55 -25
+      vertex 35 -55 -25
+    endloop
+  endfacet
+  facet normal 0 0 -1
+    outer loop
+      vertex -35 -55 -25
+      vertex -35 55 -25
+      vertex 35 55 -25
+    endloop
+  endfacet
+  facet normal 0 0 1
+    outer loop
+      vertex -35 -55 25
+      vertex 35 -55 25
+      vertex 35 55 25
+    endloop
+  endfacet
+  facet normal 0 0 1
+    outer loop
+      vertex -35 -55 25
+      vertex 35 55 25
+      vertex -35 55 25
+    endloop
+  endfacet
+  facet normal 0 -1 0
+    outer loop
+      vertex -35 -55 -25
+      vertex 35 -55 -25
+      vertex 35 -55 25
+    endloop
+  endfacet
+  facet normal 0 -1 0
+    outer loop
+      vertex -35 -55 -25
+      vertex 35 -55 25
+      vertex -35 -55 25
+    endloop
+  endfacet
+  facet normal 0 1 0
+    outer loop
+      vertex -35 55 -25
+      vertex 35 55 25
+      vertex 35 55 -25
+    endloop
+  endfacet
+  facet normal 0 1 0
+    outer loop
+      vertex -35 55 -25
+      vertex -35 55 25
+      vertex 35 55 25
+    endloop
+  endfacet
+  facet normal 1 0 0
+    outer loop
+      vertex 35 -55 -25
+      vertex 35 55 -25
+      vertex 35 55 25
+    endloop
+  endfacet
+  facet normal 1 0 0
+    outer loop
+      vertex 35 -55 -25
+      vertex 35 55 25
+      vertex 35 -55 25
+    endloop
+  endfacet
+  facet normal -1 0 0
+    outer loop
+      vertex -35 -55 -25
+      vertex -35 -55 25
+      vertex -35 55 25
+    endloop
+  endfacet
+  facet normal -1 0 0
+    outer loop
+      vertex -35 -55 -25
+      vertex -35 55 25
+      vertex -35 55 -25
+    endloop
+  endfacet
+endsolid core_self_test_box

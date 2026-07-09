@@ -1,0 +1,4 @@
+name,measured_mm,nominal_mm,lower_limit_mm,upper_limit_mm,error_mm,status
+bbox_x_mm,70.000000,70.000000,69.000000,71.000000,0.000000,PASS
+bbox_y_mm,110.000000,110.000000,109.000000,111.000000,0.000000,PASS
+bbox_z_mm,50.000000,50.000000,49.000000,51.000000,0.000000,PASS

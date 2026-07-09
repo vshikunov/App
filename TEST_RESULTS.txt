@@ -1,0 +1,26 @@
+Local validation completed in this environment.
+
+Commands run:
+  swift test
+  swift run CoreSelfTest --out /mnt/data/ios_core_self_test
+
+Core unit tests:
+  5 tests, 0 failures
+  DimensionalScannerCoreTests.testBoxMeasurements: PASS
+  DimensionalScannerCoreTests.testCSVReport: PASS
+  DimensionalScannerCoreTests.testSTLExporterWritesTriangles: PASS
+  DimensionalScannerCoreTests.testMeshScaling: PASS
+  DimensionalScannerCoreTests.testToleranceAnalysisPassAndFail: PASS
+
+CoreSelfTest output:
+  core_self_test_box.stl created
+  core_self_test_report.csv created
+  core_self_test_measurements.csv created
+
+Measured sample box:
+  bbox_x_mm = 70.000 PASS
+  bbox_y_mm = 110.000 PASS
+  bbox_z_mm = 50.000 PASS
+
+Note:
+  The iOS ARKit app itself requires Xcode and a physical LiDAR-capable iPhone. This environment does not include Xcode or iPhone hardware, so only the shared Swift mesh/STL/tolerance engine was executed here.

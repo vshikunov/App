@@ -1,0 +1,6 @@
+name,value,unit
+vertex_count,8.000000,count
+triangle_count,12.000000,count
+bbox_x_mm,70.000000,mm
+bbox_y_mm,110.000000,mm
+bbox_z_mm,50.000000,mm
