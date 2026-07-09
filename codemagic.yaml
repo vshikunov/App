@@ -7,38 +7,54 @@ workflows:
     name: DimensionalScanner iOS TestFlight
     max_build_duration: 120
     instance_type: mac_mini_m2
+
     integrations:
       app_store_connect: dimensional_scanner_key
+
     environment:
       ios_signing:
         distribution_type: app_store
-        bundle_identifier: com.yourname.DimensionalScanner
+        bundle_identifier: com.vshikunov.dimensionalscanner
       vars:
-        BUNDLE_ID: "com.yourname.DimensionalScanner"
+        BUNDLE_ID: "com.vshikunov.dimensionalscanner"
+        APP_STORE_APPLE_ID: "6788995790"
         XCODE_PROJECT: "DimensionalScanner.xcodeproj"
         XCODE_SCHEME: "DimensionalScanner"
-        # Find this in App Store Connect > your app > General > App Information > Apple ID.
-        APP_STORE_APPLE_ID: "0000000000"
       xcode: latest
+
     scripts:
       - name: Run core tests
         script: |
           swift test
+
+      - name: Make project bundle ID match Apple
+        script: |
+          perl -pi -e "s/com\.example\.DimensionalScanner/$ENV{BUNDLE_ID}/g" "$CM_BUILD_DIR/$XCODE_PROJECT/project.pbxproj"
+          grep -n "PRODUCT_BUNDLE_IDENTIFIER" "$CM_BUILD_DIR/$XCODE_PROJECT/project.pbxproj"
+
+      - name: Set build number
+        script: |
+          cd "$CM_BUILD_DIR"
+          agvtool new-version -all "$PROJECT_BUILD_NUMBER"
+
       - name: Set up provisioning profile settings on Xcode project
         script: |
           xcode-project use-profiles --project "$CM_BUILD_DIR/$XCODE_PROJECT"
+
       - name: Build signed IPA
         script: |
           xcode-project build-ipa \
             --project "$CM_BUILD_DIR/$XCODE_PROJECT" \
             --scheme "$XCODE_SCHEME" \
-            --archive-xcargs "PRODUCT_BUNDLE_IDENTIFIER=$BUNDLE_ID COMPILER_INDEX_STORE_ENABLE=NO"
+            --archive-xcargs "PRODUCT_BUNDLE_IDENTIFIER=$BUNDLE_ID CURRENT_PROJECT_VERSION=$PROJECT_BUILD_NUMBER COMPILER_INDEX_STORE_ENABLE=NO"
+
     artifacts:
       - build/ios/ipa/*.ipa
       - /tmp/xcodebuild_logs/*.log
       - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.dSYM
+
     publishing:
       app_store_connect:
         auth: integration
-        submit_to_testflight: true
+        submit_to_testflight: false
         submit_to_app_store: false
