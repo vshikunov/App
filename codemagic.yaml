@@ -15,38 +15,151 @@ workflows:
       ios_signing:
         distribution_type: app_store
         bundle_identifier: com.vshikunov.dimensionalscanner
+
       vars:
         BUNDLE_ID: "com.vshikunov.dimensionalscanner"
         APP_STORE_APPLE_ID: "6788995790"
         XCODE_PROJECT: "DimensionalScanner.xcodeproj"
         XCODE_SCHEME: "DimensionalScanner"
+
       xcode: latest
 
     scripts:
       - name: Run core tests
         script: |
+          set -e
           swift test
 
       - name: Make project bundle ID match Apple
         script: |
+          set -e
           perl -pi -e "s/com\.example\.DimensionalScanner/$ENV{BUNDLE_ID}/g" "$CM_BUILD_DIR/$XCODE_PROJECT/project.pbxproj"
           grep -n "PRODUCT_BUNDLE_IDENTIFIER" "$CM_BUILD_DIR/$XCODE_PROJECT/project.pbxproj"
 
       - name: Set build number
         script: |
+          set -e
           cd "$CM_BUILD_DIR"
-          agvtool new-version -all "$PROJECT_BUILD_NUMBER"
+          agvtool new-version -all "$PROJECT_BUILD_NUMBER" || true
 
-      - name: Set up provisioning profile settings on Xcode project
+      - name: Read installed App Store provisioning profile
         script: |
-          xcode-project use-profiles --project "$CM_BUILD_DIR/$XCODE_PROJECT"
+          set -e
 
-      - name: Build signed IPA
+          PROFILES_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          echo "Looking for provisioning profile in: $PROFILES_DIR"
+
+          PROFILE_PATH=""
+
+          for profile in "$PROFILES_DIR"/*.mobileprovision; do
+            [ -e "$profile" ] || continue
+
+            security cms -D -i "$profile" > /tmp/profile.plist 2>/dev/null || continue
+
+            APP_IDENTIFIER=$(/usr/libexec/PlistBuddy -c "Print :Entitlements:application-identifier" /tmp/profile.plist 2>/dev/null || true)
+
+            echo "Found profile app identifier: $APP_IDENTIFIER"
+
+            if [[ "$APP_IDENTIFIER" == *".$BUNDLE_ID" ]]; then
+              PROFILE_PATH="$profile"
+              break
+            fi
+          done
+
+          if [ -z "$PROFILE_PATH" ]; then
+            echo "No matching provisioning profile found for $BUNDLE_ID"
+            echo "Available profiles:"
+            ls -la "$PROFILES_DIR" || true
+            exit 1
+          fi
+
+          security cms -D -i "$PROFILE_PATH" > /tmp/selected_profile.plist
+
+          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c "Print :Name" /tmp/selected_profile.plist)
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c "Print :UUID" /tmp/selected_profile.plist)
+          APPLE_TEAM_ID=$(/usr/libexec/PlistBuddy -c "Print :TeamIdentifier:0" /tmp/selected_profile.plist)
+
+          echo "Using provisioning profile:"
+          echo "PROFILE_PATH=$PROFILE_PATH"
+          echo "PROFILE_NAME=$PROFILE_NAME"
+          echo "PROFILE_UUID=$PROFILE_UUID"
+          echo "APPLE_TEAM_ID=$APPLE_TEAM_ID"
+
+          echo "PROFILE_NAME=$PROFILE_NAME" >> "$CM_ENV"
+          echo "PROFILE_UUID=$PROFILE_UUID" >> "$CM_ENV"
+          echo "APPLE_TEAM_ID=$APPLE_TEAM_ID" >> "$CM_ENV"
+
+      - name: Create export options plist
         script: |
-          xcode-project build-ipa \
-            --project "$CM_BUILD_DIR/$XCODE_PROJECT" \
-            --scheme "$XCODE_SCHEME" \
-            --archive-xcargs "PRODUCT_BUNDLE_IDENTIFIER=$BUNDLE_ID CURRENT_PROJECT_VERSION=$PROJECT_BUILD_NUMBER COMPILER_INDEX_STORE_ENABLE=NO"
+          set -e
+
+          cat > "$HOME/export_options.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>method</key>
+              <string>app-store-connect</string>
+
+              <key>signingStyle</key>
+              <string>manual</string>
+
+              <key>teamID</key>
+              <string>$APPLE_TEAM_ID</string>
+
+              <key>provisioningProfiles</key>
+              <dict>
+                  <key>$BUNDLE_ID</key>
+                  <string>$PROFILE_NAME</string>
+              </dict>
+
+              <key>stripSwiftSymbols</key>
+              <true/>
+
+              <key>compileBitcode</key>
+              <false/>
+
+              <key>uploadSymbols</key>
+              <true/>
+          </dict>
+          </plist>
+          EOF
+
+          cat "$HOME/export_options.plist"
+
+      - name: Build signed IPA manually
+        script: |
+          set -e
+
+          ARCHIVE_PATH="$CM_BUILD_DIR/build/ios/xcarchive/DimensionalScanner.xcarchive"
+          EXPORT_PATH="$CM_BUILD_DIR/build/ios/ipa"
+
+          mkdir -p "$(dirname "$ARCHIVE_PATH")"
+          mkdir -p "$EXPORT_PATH"
+
+          xcodebuild archive \
+            -project "$CM_BUILD_DIR/$XCODE_PROJECT" \
+            -scheme "$XCODE_SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -archivePath "$ARCHIVE_PATH" \
+            PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
+            CURRENT_PROJECT_VERSION="$PROJECT_BUILD_NUMBER" \
+            MARKETING_VERSION="1.0" \
+            CODE_SIGN_STYLE=Manual \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            SKIP_INSTALL=NO
+
+          xcodebuild -exportArchive \
+            -archivePath "$ARCHIVE_PATH" \
+            -exportPath "$EXPORT_PATH" \
+            -exportOptionsPlist "$HOME/export_options.plist"
+
+          ls -la "$EXPORT_PATH"
 
     artifacts:
       - build/ios/ipa/*.ipa
