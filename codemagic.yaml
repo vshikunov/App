@@ -30,17 +30,29 @@ workflows:
           set -e
           swift test
 
-      - name: Make project bundle ID match Apple
+           - name: Make project bundle ID match Apple
         script: |
           set -e
-          perl -pi -e "s/com\.example\.DimensionalScanner/$ENV{BUNDLE_ID}/g" "$CM_BUILD_DIR/$XCODE_PROJECT/project.pbxproj"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          project_file = Path(os.environ["CM_BUILD_DIR"]) / os.environ["XCODE_PROJECT"] / "project.pbxproj"
+          text = project_file.read_text()
+
+          text = text.replace("com.example.DimensionalScanner", os.environ["BUNDLE_ID"])
+          text = text.replace("{BUNDLE_ID}", os.environ["BUNDLE_ID"])
+
+          project_file.write_text(text)
+          print(project_file.read_text().count(os.environ["BUNDLE_ID"]))
+          PY
+
           grep -n "PRODUCT_BUNDLE_IDENTIFIER" "$CM_BUILD_DIR/$XCODE_PROJECT/project.pbxproj"
 
-      - name: Set build number
+           - name: Set build number
         script: |
           set -e
-          cd "$CM_BUILD_DIR"
-          agvtool new-version -all "$PROJECT_BUILD_NUMBER" || true
+          echo "Using Codemagic build number: $PROJECT_BUILD_NUMBER"
 
       - name: Read installed App Store provisioning profile
         script: |
