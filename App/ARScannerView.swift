@@ -312,7 +312,7 @@ private extension ARMeshGeometry {
     func triangleIndices(faceIndex: Int) -> (Int, Int, Int)? {
         let faces = self.faces
         guard faces.indexCountPerPrimitive == 3 else { return nil }
-        let byteOffset = faces.offset + faceIndex * faces.indexCountPerPrimitive * faces.bytesPerIndex
+        let byteOffset = faceIndex * faces.indexCountPerPrimitive * faces.bytesPerIndex
         let address = faces.buffer.contents().advanced(by: byteOffset)
 
         if faces.bytesPerIndex == MemoryLayout<UInt16>.size {
