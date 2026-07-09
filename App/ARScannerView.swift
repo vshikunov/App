@@ -80,14 +80,16 @@ final class ARScannerController: NSObject, ARSessionDelegate {
         postStatus("ARKit mesh reconstruction is running. Aim at the object and tap Set Center.")
     }
 
-    func resetSession() {
-        anchorQueue.sync {
-            meshAnchors.removeAll()
-            captureActive = false
-        }
-        objectCenterWorld = nil
-        startSession(showMeshOverlay: model?.showMeshOverlay ?? true)
+    @MainActor
+func resetSession() {
+    anchorQueue.sync {
+        meshAnchors.removeAll()
+        captureActive = false
     }
+
+    objectCenterWorld = nil
+    startSession(showMeshOverlay: model?.showMeshOverlay ?? true)
+}
 
     func setMeshOverlayVisible(_ visible: Bool) {
         guard let arView else { return }
