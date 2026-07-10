@@ -106,6 +106,11 @@ struct ContentView: View {
             .font(.subheadline.weight(.semibold))
             .lineLimit(1)
 
+          Text("4-POINT AREA • DEPTH FUSION")
+            .font(.caption2.weight(.bold))
+            .foregroundStyle(.cyan)
+            .lineLimit(1)
+
           if statusExpanded {
             Text(model.status)
               .font(.caption)
@@ -127,6 +132,11 @@ struct ContentView: View {
               Label(model.objectIsolationMessage, systemImage: "viewfinder.circle")
                 .font(.caption2)
                 .foregroundStyle(.cyan)
+                .lineLimit(2)
+
+              Label(model.captureDiagnosticsText, systemImage: "dot.radiowaves.left.and.right")
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
                 .lineLimit(2)
             }
 
@@ -354,12 +364,10 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 2) {
           Text(model.liveMeshDimensions == nil ? "Finding object in the area" : "Object isolated — capture all sides")
             .font(.subheadline.weight(.semibold))
-          Text(
-            "\(Int(model.scanCoveragePercent.rounded()))% views • \(model.capturedSurfaceTriangleCount.formatted()) triangles"
-          )
-          .font(.caption2.monospacedDigit())
-          .foregroundStyle(.secondary)
-          .lineLimit(1)
+          Text("\(Int(model.scanCoveragePercent.rounded()))% views • \(model.captureDiagnosticsText)")
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(.secondary)
+            .lineLimit(2)
         }
 
         Spacer(minLength: 2)
@@ -380,7 +388,7 @@ struct ContentView: View {
             .fontWeight(.semibold)
         }
         .buttonStyle(.borderedProminent)
-        .disabled(model.capturedSurfaceTriangleCount == 0)
+        .disabled(model.isGeneratingSTL)
       }
     }
     .padding(11)
@@ -397,11 +405,9 @@ struct ContentView: View {
           VStack(alignment: .leading, spacing: 2) {
             Text("Object surface preview")
               .font(.subheadline.weight(.semibold))
-            Text(
-              "\(model.capturedSurfaceTriangleCount.formatted()) triangles • \(Int(model.scanCoveragePercent.rounded()))% views"
-            )
-            .font(.caption2.monospacedDigit())
-            .foregroundStyle(.secondary)
+            Text("\(model.captureDiagnosticsText) • \(Int(model.scanCoveragePercent.rounded()))% views")
+              .font(.caption2.monospacedDigit())
+              .foregroundStyle(.secondary)
           }
           Spacer()
         }
@@ -423,7 +429,7 @@ struct ContentView: View {
             .frame(maxWidth: .infinity)
         }
         .buttonStyle(.borderedProminent)
-        .disabled(model.capturedSurfaceTriangleCount == 0)
+        .disabled(model.isGeneratingSTL)
       }
     }
     .padding(12)
@@ -439,7 +445,7 @@ struct ContentView: View {
       VStack(alignment: .leading, spacing: 2) {
         Text("Identifying object and building STL")
           .font(.subheadline.weight(.semibold))
-        Text("Removing the ground, selecting the connected object surface, and measuring the mesh…")
+        Text("Fusing per-frame LiDAR depth with the ARKit mesh, removing the ground, and measuring the selected object…")
           .font(.caption)
           .foregroundStyle(.secondary)
           .lineLimit(2)

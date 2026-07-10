@@ -71,11 +71,18 @@ final class ScannerViewModel: ObservableObject {
   @Published var scanVolumeZMM: Double = 200.0
 
   // Automatic area/object isolation settings.
-  @Published var footprintMarginMM: Double = 3.0
+  @Published var footprintMarginMM: Double = 8.0
   @Published var maximumObjectHeightMM: Double = 600.0
   @Published var groundClearanceMM: Double = 3.0
-  @Published var minimumObjectHeightMM: Double = 8.0
+  @Published var minimumObjectHeightMM: Double = 4.0
   @Published var objectMergeDistanceMM: Double = 18.0
+
+  // Per-frame LiDAR depth fusion. This is the reliable fallback when ARKit's coarse
+  // scene-reconstruction mesh does not resolve a small tabletop object.
+  @Published var depthFusionEnabled: Bool = true
+  @Published var depthSamplingStride: Int = 4
+  @Published var depthMaximumEdgeMM: Double = 35.0
+  @Published var includeLowConfidenceDepth: Bool = true
 
   // Display options.
   @Published var showMeshOverlay: Bool = false
@@ -107,6 +114,13 @@ final class ScannerViewModel: ObservableObject {
   @Published var isGeneratingSTL: Bool = false
   @Published var detectedComponentCount: Int = 0
   @Published var objectIsolationMessage: String = "Waiting for the four-point area"
+
+  // Capture diagnostics make failed scans actionable instead of silently producing
+  // no STL.
+  @Published var capturedDepthPointCount: Int = 0
+  @Published var capturedDepthTriangleCount: Int = 0
+  @Published var capturedSceneMeshAnchorCount: Int = 0
+  @Published var captureSourceText: String = "Waiting for LiDAR depth"
 
   weak var arController: ARScannerController?
 
@@ -156,6 +170,16 @@ final class ScannerViewModel: ObservableObject {
     referencePoints.count < referencePointLabels.count
   }
 
+  var canBuildSTL: Bool {
+    capturedSurfaceTriangleCount > 0
+      || capturedDepthTriangleCount >= 12
+      || capturedSceneMeshAnchorCount > 0
+  }
+
+  var captureDiagnosticsText: String {
+    "\(captureSourceText) • pts \(capturedDepthPointCount.formatted()) • tris \(capturedDepthTriangleCount.formatted()) • anchors \(capturedSceneMeshAnchorCount.formatted())"
+  }
+
   var compactStatusTitle: String {
     switch workflowPhase {
     case .definingArea:
@@ -166,7 +190,7 @@ final class ScannerViewModel: ObservableObject {
       if let liveMeshDimensions {
         return "Object detected • \(liveMeshDimensions.compactDescription)"
       }
-      return "Finding object • \(Int(scanCoveragePercent.rounded()))%"
+      return "Finding object • \(captureSourceText)"
     case .review:
       return "Object surface captured • Review or measure"
     case .processing:
@@ -248,6 +272,10 @@ final class ScannerViewModel: ObservableObject {
     isGeneratingSTL = false
     detectedComponentCount = 0
     objectIsolationMessage = "Waiting for the four-point area"
+    capturedDepthPointCount = 0
+    capturedDepthTriangleCount = 0
+    capturedSceneMeshAnchorCount = 0
+    captureSourceText = "Waiting for LiDAR depth"
     arController?.removeLastReferencePointMarker()
     arController?.invalidateBoundingBox()
     status = "Removed \(removed.label). Aim at \(nextReferencePointLabel)."
@@ -273,6 +301,10 @@ final class ScannerViewModel: ObservableObject {
     isGeneratingSTL = false
     detectedComponentCount = 0
     objectIsolationMessage = "Waiting for the four-point area"
+    capturedDepthPointCount = 0
+    capturedDepthTriangleCount = 0
+    capturedSceneMeshAnchorCount = 0
+    captureSourceText = "Waiting for LiDAR depth"
     measurements = []
     toleranceResults = []
     lastSTLURL = nil
@@ -342,6 +374,10 @@ final class ScannerViewModel: ObservableObject {
     liveMeshDimensions = nil
     exportedSTLDimensions = nil
     detectedComponentCount = 0
+    capturedDepthPointCount = 0
+    capturedDepthTriangleCount = 0
+    capturedSceneMeshAnchorCount = 0
+    captureSourceText = depthFusionEnabled ? "LiDAR depth starting" : "ARKit mesh starting"
     objectIsolationMessage = "Scanning the selected footprint and removing the support surface"
     isGeneratingSTL = false
     arController.beginCapture(resetCoverage: true)
@@ -360,6 +396,12 @@ final class ScannerViewModel: ObservableObject {
   func finishSurfaceScanAndCreateSTL() {
     guard groundAreaReady else {
       status = "Capture the four ground corners before creating an STL."
+      return
+    }
+
+    guard canBuildSTL else {
+      status = "No object geometry has been captured yet. Keep the phone 25–80 cm from the object, move slowly around it, and wait until the points/triangles counter increases."
+      UINotificationFeedbackGenerator().notificationOccurred(.warning)
       return
     }
 
@@ -433,6 +475,10 @@ final class ScannerViewModel: ObservableObject {
     isGeneratingSTL = false
     detectedComponentCount = 0
     objectIsolationMessage = "Waiting for the four-point area"
+    capturedDepthPointCount = 0
+    capturedDepthTriangleCount = 0
+    capturedSceneMeshAnchorCount = 0
+    captureSourceText = "Waiting for LiDAR depth"
     reticleHasSurface = false
     reticleDistanceMM = nil
     status = "New scan ready. Capture four ground corners clockwise around the object."
@@ -466,7 +512,7 @@ final class ScannerViewModel: ObservableObject {
           volumeZMM: scanVolumeZMM
         ), !rawMesh.isEmpty
       else {
-        status = "No isolated object surface was found. Resume scanning or redraw the ground area closer to the part."
+        status = "No STL surface was found. Captured depth: \(capturedDepthPointCount) points / \(capturedDepthTriangleCount) triangles; AR mesh: \(capturedSceneMeshAnchorCount) anchors. Resume scanning, keep the object inside the blue area, and reduce Ground clearance if the part is very low."
         UINotificationFeedbackGenerator().notificationOccurred(.warning)
         return
       }
@@ -518,6 +564,12 @@ final class ScannerViewModel: ObservableObject {
         MeshMeasurement(name: "scan_coverage_percent", value: scanCoveragePercent, unit: "percent"))
       newMeasurements.append(
         MeshMeasurement(name: "detected_component_count", value: Double(detectedComponentCount), unit: "count"))
+      newMeasurements.append(
+        MeshMeasurement(name: "depth_point_sample_count", value: Double(capturedDepthPointCount), unit: "count"))
+      newMeasurements.append(
+        MeshMeasurement(name: "depth_triangle_count", value: Double(capturedDepthTriangleCount), unit: "count"))
+      newMeasurements.append(
+        MeshMeasurement(name: "scene_mesh_anchor_count", value: Double(capturedSceneMeshAnchorCount), unit: "count"))
 
       let measurementMap = Dictionary(
         uniqueKeysWithValues: newMeasurements.map { ($0.name, $0.value) })
@@ -541,12 +593,24 @@ final class ScannerViewModel: ObservableObject {
       } else {
         status = "Object STL ready: \(lastTriangleCount) triangles."
       }
-      objectIsolationMessage = "Largest connected object cluster exported"
+      objectIsolationMessage = "Object surface exported from \(captureSourceText)"
       UINotificationFeedbackGenerator().notificationOccurred(.success)
     } catch {
       status = "Export failed: \(error.localizedDescription)"
       UINotificationFeedbackGenerator().notificationOccurred(.error)
     }
+  }
+
+  func updateCaptureDiagnostics(
+    depthPointCount: Int,
+    depthTriangleCount: Int,
+    sceneMeshAnchorCount: Int,
+    source: String
+  ) {
+    capturedDepthPointCount = max(depthPointCount, 0)
+    capturedDepthTriangleCount = max(depthTriangleCount, 0)
+    capturedSceneMeshAnchorCount = max(sceneMeshAnchorCount, 0)
+    captureSourceText = source
   }
 
   func updateLiveMeshDimensions(

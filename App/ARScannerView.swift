@@ -69,7 +69,7 @@ private struct MeshCropContext {
   let removeSupportSurface: Bool
 }
 
-private struct CandidateTriangle {
+private struct CandidateTriangle: Sendable {
   let world0: SIMD3<Float>
   let world1: SIMD3<Float>
   let world2: SIMD3<Float>
@@ -86,6 +86,34 @@ private struct CandidateTriangle {
   var localMax: SIMD3<Float> {
     simd_max(local0, simd_max(local1, local2))
   }
+}
+
+private struct DepthTriangleKey: Hashable, Sendable {
+  let x: Int32
+  let y: Int32
+  let z: Int32
+  let orientation: Int8
+}
+
+private struct DepthFrameSnapshot: @unchecked Sendable {
+  let width: Int
+  let height: Int
+  let depths: [Float]
+  let confidences: [UInt8]?
+  let cameraTransform: simd_float4x4
+  let inverseIntrinsics: simd_float3x3
+  let imageWidth: Float
+  let imageHeight: Float
+}
+
+private struct DepthGridPoint: Sendable {
+  let world: SIMD3<Float>
+  let local: SIMD3<Float>
+}
+
+private struct DepthTriangleBatch: Sendable {
+  let triangles: [DepthTriangleKey: CandidateTriangle]
+  let acceptedPointCount: Int
 }
 
 private struct SpatialKey: Hashable {
@@ -149,8 +177,21 @@ final class ARScannerController: NSObject, ARSessionDelegate {
   private let anchorQueue = DispatchQueue(label: "DimensionalScanner.ARMeshAnchors")
   private let previewQueue = DispatchQueue(
     label: "DimensionalScanner.SurfacePreview", qos: .userInitiated)
+  private let depthQueue = DispatchQueue(
+    label: "DimensionalScanner.DepthFusion", qos: .userInitiated)
   private var meshAnchors: [UUID: ARMeshAnchor] = [:]
+  private var fusedDepthTriangles: [DepthTriangleKey: CandidateTriangle] = [:]
+  private var fusedDepthPointSamples = 0
   private var captureActive = false
+  private var depthProcessingInFlight = false
+  private var lastDepthCaptureTime: CFTimeInterval = 0
+  private let depthCaptureInterval: CFTimeInterval = 0.20
+  private let maximumStoredDepthTriangles = 60_000
+
+  private var depthFusionEnabled = true
+  private var depthSamplingStride = 4
+  private var depthMaximumEdgeM: Float = 0.035
+  private var includeLowConfidenceDepth = true
 
   /// Center used for camera-coverage guidance.
   private var objectCenterWorld: SIMD3<Float>?
@@ -229,7 +270,11 @@ final class ARScannerController: NSObject, ARSessionDelegate {
 
     anchorQueue.sync {
       meshAnchors.removeAll()
+      fusedDepthTriangles.removeAll()
+      fusedDepthPointSamples = 0
       captureActive = false
+      depthProcessingInFlight = false
+      lastDepthCaptureTime = 0
     }
     arView?.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
     setMeshOverlayVisible(showMeshOverlay)
@@ -364,6 +409,10 @@ final class ARScannerController: NSObject, ARSessionDelegate {
 
     anchorQueue.sync {
       captureActive = false
+      fusedDepthTriangles.removeAll()
+      fusedDepthPointSamples = 0
+      depthProcessingInFlight = false
+      lastDepthCaptureTime = 0
     }
   }
 
@@ -390,14 +439,23 @@ final class ARScannerController: NSObject, ARSessionDelegate {
     groundFootprintWidthM = 0
     groundFootprintDepthM = 0
     coveredCameraSectors.removeAll()
+    var sceneAnchorCount = 0
+    anchorQueue.sync {
+      captureActive = false
+      fusedDepthTriangles.removeAll()
+      fusedDepthPointSamples = 0
+      depthProcessingInFlight = false
+      lastDepthCaptureTime = 0
+      sceneAnchorCount = meshAnchors.count
+    }
     model?.clearLiveMeshDimensions()
+    model?.updateCaptureDiagnostics(
+      depthPointCount: 0,
+      depthTriangleCount: 0,
+      sceneMeshAnchorCount: sceneAnchorCount,
+      source: "Waiting for LiDAR depth"
+    )
     model?.scanCoveragePercent = 0
-  }
-
-  /// Compatibility alias used by previous patches.
-  @MainActor
-  func clearSixPointReference() {
-    clearReferenceVisuals()
   }
 
   /// Four points define a convex footprint on one ground/support plane.
@@ -509,14 +567,49 @@ final class ARScannerController: NSObject, ARSessionDelegate {
       coveredCameraSectors.removeAll()
       model?.scanCoveragePercent = 0
     }
+
+    depthFusionEnabled = model?.depthFusionEnabled ?? true
+    depthSamplingStride = max(min(model?.depthSamplingStride ?? 4, 10), 2)
+    depthMaximumEdgeM = max(Float((model?.depthMaximumEdgeMM ?? 35) / 1000), 0.010)
+    includeLowConfidenceDepth = model?.includeLowConfidenceDepth ?? true
+
     let currentMeshAnchors =
       arView?.session.currentFrame?.anchors.compactMap { $0 as? ARMeshAnchor } ?? []
+    var initialDepthPointCount = 0
+    var initialDepthCount = 0
+    var initialAnchorCount = 0
     anchorQueue.sync {
       captureActive = true
+      if resetCoverage {
+        fusedDepthTriangles.removeAll()
+        fusedDepthPointSamples = 0
+        depthProcessingInFlight = false
+        lastDepthCaptureTime = 0
+      }
       for anchor in currentMeshAnchors {
         meshAnchors[anchor.identifier] = anchor
       }
+      initialDepthPointCount = fusedDepthPointSamples
+      initialDepthCount = fusedDepthTriangles.count
+      initialAnchorCount = meshAnchors.count
     }
+
+    let initialSource: String
+    if initialDepthCount > 0 && initialAnchorCount > 0 {
+      initialSource = "LiDAR depth + AR mesh"
+    } else if initialDepthCount > 0 {
+      initialSource = "LiDAR depth"
+    } else if initialAnchorCount > 0 {
+      initialSource = depthFusionEnabled ? "AR mesh; waiting for depth" : "ARKit mesh"
+    } else {
+      initialSource = depthFusionEnabled ? "LiDAR depth starting" : "Waiting for AR mesh"
+    }
+    model?.updateCaptureDiagnostics(
+      depthPointCount: initialDepthPointCount,
+      depthTriangleCount: initialDepthCount,
+      sceneMeshAnchorCount: initialAnchorCount,
+      source: initialSource
+    )
     requestSurfacePreview(force: true)
   }
 
@@ -544,9 +637,18 @@ final class ARScannerController: NSObject, ARSessionDelegate {
       return nil
     }
 
-    let anchors = anchorQueue.sync { Array(meshAnchors.values) }
-    guard !anchors.isEmpty else { return nil }
-    let candidates = Self.collectCandidateTriangles(anchors: anchors, context: context)
+    // Wait for the single in-flight depth frame to finish merging before export.
+    depthQueue.sync {}
+    let captureSnapshot = anchorQueue.sync {
+      (Array(meshAnchors.values), Array(fusedDepthTriangles.values))
+    }
+    let candidates = Self.combinedCandidates(
+      anchors: captureSnapshot.0,
+      depthTriangles: captureSnapshot.1,
+      context: context,
+      maximumCount: maximumStoredDepthTriangles
+    )
+    guard !candidates.isEmpty else { return nil }
     let isolation = Self.isolateObjectTriangles(candidates, context: context)
     guard !isolation.triangles.isEmpty else { return nil }
 
@@ -921,6 +1023,296 @@ final class ARScannerController: NSObject, ARSessionDelegate {
     )
   }
 
+  private static func combinedCandidates(
+    anchors: [ARMeshAnchor],
+    depthTriangles: [CandidateTriangle],
+    context: MeshCropContext,
+    maximumCount: Int
+  ) -> [CandidateTriangle] {
+    let sceneTriangles = collectCandidateTriangles(anchors: anchors, context: context)
+    var combined: [CandidateTriangle] = []
+    combined.reserveCapacity(min(depthTriangles.count + sceneTriangles.count, maximumCount))
+
+    // Per-frame scene depth is preferred for small objects. The ARKit scene mesh
+    // remains useful for filling larger surfaces, so add both and deduplicate them.
+    combined.append(contentsOf: depthTriangles)
+    combined.append(contentsOf: sceneTriangles)
+    guard !combined.isEmpty else { return [] }
+
+    let quantizationM: Float = 0.003
+    var unique: [DepthTriangleKey: CandidateTriangle] = [:]
+    unique.reserveCapacity(min(combined.count, maximumCount))
+    let step = max(Double(combined.count) / Double(max(maximumCount, 1)), 1)
+    var cursor = 0.0
+    while Int(cursor) < combined.count && unique.count < maximumCount {
+      let triangle = combined[Int(cursor)]
+      unique[depthTriangleKey(for: triangle, quantizationM: quantizationM)] = triangle
+      cursor += step
+    }
+    return Array(unique.values)
+  }
+
+  private static func makeDepthFrameSnapshot(from frame: ARFrame) -> DepthFrameSnapshot? {
+    guard let depthData = frame.smoothedSceneDepth ?? frame.sceneDepth else { return nil }
+    let depthMap = depthData.depthMap
+    let width = CVPixelBufferGetWidth(depthMap)
+    let height = CVPixelBufferGetHeight(depthMap)
+    guard width > 1, height > 1 else { return nil }
+
+    CVPixelBufferLockBaseAddress(depthMap, .readOnly)
+    defer { CVPixelBufferUnlockBaseAddress(depthMap, .readOnly) }
+    guard let depthBase = CVPixelBufferGetBaseAddress(depthMap) else { return nil }
+    let depthRowBytes = CVPixelBufferGetBytesPerRow(depthMap)
+    var depths = Array(repeating: Float.nan, count: width * height)
+    for y in 0..<height {
+      let row = depthBase.advanced(by: y * depthRowBytes).assumingMemoryBound(to: Float32.self)
+      let destination = y * width
+      for x in 0..<width {
+        depths[destination + x] = Float(row[x])
+      }
+    }
+
+    var confidences: [UInt8]?
+    if let confidenceMap = depthData.confidenceMap,
+      CVPixelBufferGetWidth(confidenceMap) == width,
+      CVPixelBufferGetHeight(confidenceMap) == height
+    {
+      CVPixelBufferLockBaseAddress(confidenceMap, .readOnly)
+      if let confidenceBase = CVPixelBufferGetBaseAddress(confidenceMap) {
+        let confidenceRowBytes = CVPixelBufferGetBytesPerRow(confidenceMap)
+        var copied = Array(repeating: UInt8(0), count: width * height)
+        for y in 0..<height {
+          let row = confidenceBase.advanced(by: y * confidenceRowBytes).assumingMemoryBound(to: UInt8.self)
+          let destination = y * width
+          for x in 0..<width {
+            copied[destination + x] = row[x]
+          }
+        }
+        confidences = copied
+      }
+      CVPixelBufferUnlockBaseAddress(confidenceMap, .readOnly)
+    }
+
+    let imageResolution = frame.camera.imageResolution
+    guard imageResolution.width > 0, imageResolution.height > 0 else { return nil }
+    return DepthFrameSnapshot(
+      width: width,
+      height: height,
+      depths: depths,
+      confidences: confidences,
+      cameraTransform: frame.camera.transform,
+      inverseIntrinsics: simd_inverse(frame.camera.intrinsics),
+      imageWidth: Float(imageResolution.width),
+      imageHeight: Float(imageResolution.height)
+    )
+  }
+
+  private static func buildDepthTriangleBatch(
+    snapshot: DepthFrameSnapshot,
+    context: MeshCropContext,
+    stride: Int,
+    maximumEdgeM: Float,
+    includeLowConfidence: Bool
+  ) -> DepthTriangleBatch {
+    let safeStride = max(stride, 2)
+    let gridWidth = (snapshot.width + safeStride - 1) / safeStride
+    let gridHeight = (snapshot.height + safeStride - 1) / safeStride
+    var grid = Array<DepthGridPoint?>(repeating: nil, count: gridWidth * gridHeight)
+    var acceptedPointCount = 0
+
+    let cameraScaleX = snapshot.imageWidth / Float(snapshot.width)
+    let cameraScaleY = snapshot.imageHeight / Float(snapshot.height)
+    let minimumConfidence: UInt8 = includeLowConfidence ? 0 : 1
+
+    for gridY in 0..<gridHeight {
+      let pixelY = min(gridY * safeStride, snapshot.height - 1)
+      for gridX in 0..<gridWidth {
+        let pixelX = min(gridX * safeStride, snapshot.width - 1)
+        let sourceIndex = pixelY * snapshot.width + pixelX
+        let depth = snapshot.depths[sourceIndex]
+        guard depth.isFinite, depth > 0.08, depth < 4.0 else { continue }
+        if let confidences = snapshot.confidences,
+          confidences[sourceIndex] < minimumConfidence
+        {
+          continue
+        }
+
+        let imagePixel = SIMD3<Float>(
+          Float(pixelX) * cameraScaleX,
+          Float(pixelY) * cameraScaleY,
+          1
+        )
+        let cameraRay = snapshot.inverseIntrinsics * imagePixel
+        let cameraPoint = cameraRay * depth
+        // ARKit's camera looks down negative Z and has positive Y upward.
+        let world4 = snapshot.cameraTransform
+          * SIMD4<Float>(cameraPoint.x, -cameraPoint.y, -cameraPoint.z, 1)
+        let world = SIMD3<Float>(world4.x, world4.y, world4.z)
+        let local = worldToLocal(
+          world,
+          center: context.referenceOriginWorld,
+          basis: context.basisWorld
+        )
+
+        guard local.y >= context.groundClearanceM,
+          local.y <= context.maximumHeightM,
+          pointInsideOrNearPolygon(
+            SIMD2<Float>(local.x, local.z),
+            polygon: context.footprintPolygonXZ,
+            margin: context.footprintPaddingM
+          )
+        else {
+          continue
+        }
+
+        grid[gridY * gridWidth + gridX] = DepthGridPoint(world: world, local: local)
+        acceptedPointCount += 1
+      }
+    }
+
+    var triangles: [DepthTriangleKey: CandidateTriangle] = [:]
+    triangles.reserveCapacity(max(gridWidth * gridHeight, 256))
+
+    func addTriangle(_ p0: DepthGridPoint, _ p1: DepthGridPoint, _ p2: DepthGridPoint) {
+      let edge01 = simd_length(p1.local - p0.local)
+      let edge12 = simd_length(p2.local - p1.local)
+      let edge20 = simd_length(p0.local - p2.local)
+      guard max(edge01, max(edge12, edge20)) <= maximumEdgeM else { return }
+
+      let cross = simd_cross(p1.local - p0.local, p2.local - p0.local)
+      let areaM2 = simd_length(cross) * 0.5
+      guard areaM2 > 0.00000005 else { return }
+
+      let centroid = (p0.local + p1.local + p2.local) / 3
+      let triangle = CandidateTriangle(
+        world0: p0.world,
+        world1: p1.world,
+        world2: p2.world,
+        local0: p0.local,
+        local1: p1.local,
+        local2: p2.local,
+        centroid: centroid,
+        areaM2: areaM2
+      )
+      triangles[depthTriangleKey(for: triangle, quantizationM: 0.003)] = triangle
+    }
+
+    guard gridWidth >= 2, gridHeight >= 2 else {
+      return DepthTriangleBatch(triangles: triangles, acceptedPointCount: acceptedPointCount)
+    }
+
+    for y in 0..<(gridHeight - 1) {
+      for x in 0..<(gridWidth - 1) {
+        let p00 = grid[y * gridWidth + x]
+        let p10 = grid[y * gridWidth + x + 1]
+        let p01 = grid[(y + 1) * gridWidth + x]
+        let p11 = grid[(y + 1) * gridWidth + x + 1]
+        if let p00, let p10, let p11 { addTriangle(p00, p10, p11) }
+        if let p00, let p11, let p01 { addTriangle(p00, p11, p01) }
+      }
+    }
+    return DepthTriangleBatch(triangles: triangles, acceptedPointCount: acceptedPointCount)
+  }
+
+  private static func depthTriangleKey(
+    for triangle: CandidateTriangle,
+    quantizationM: Float
+  ) -> DepthTriangleKey {
+    let q = max(quantizationM, 0.001)
+    let normalRaw = simd_cross(triangle.local1 - triangle.local0, triangle.local2 - triangle.local0)
+    let normal = simd_length(normalRaw) > 0.000001
+      ? simd_normalize(normalRaw)
+      : SIMD3<Float>(0, 1, 0)
+    let absolute = SIMD3<Float>(abs(normal.x), abs(normal.y), abs(normal.z))
+    let orientation: Int8
+    if absolute.x >= absolute.y && absolute.x >= absolute.z {
+      orientation = normal.x >= 0 ? 0 : 1
+    } else if absolute.y >= absolute.z {
+      orientation = normal.y >= 0 ? 2 : 3
+    } else {
+      orientation = normal.z >= 0 ? 4 : 5
+    }
+    return DepthTriangleKey(
+      x: Int32((triangle.centroid.x / q).rounded()),
+      y: Int32((triangle.centroid.y / q).rounded()),
+      z: Int32((triangle.centroid.z / q).rounded()),
+      orientation: orientation
+    )
+  }
+
+  @MainActor
+  private func enqueueDepthSnapshot(_ snapshot: DepthFrameSnapshot) {
+    guard depthFusionEnabled,
+      let context = makeCropContext(
+        volumeXMM: model?.scanVolumeXMM ?? 200,
+        maximumHeightMM: model?.maximumObjectHeightMM ?? 600,
+        volumeZMM: model?.scanVolumeZMM ?? 200
+      )
+    else {
+      anchorQueue.async { self.depthProcessingInFlight = false }
+      return
+    }
+
+    let stride = depthSamplingStride
+    let maximumEdgeM = depthMaximumEdgeM
+    let includeLowConfidence = includeLowConfidenceDepth
+    let maximumStored = maximumStoredDepthTriangles
+
+    depthQueue.async { [weak self] in
+      guard let self else { return }
+      let batch = Self.buildDepthTriangleBatch(
+        snapshot: snapshot,
+        context: context,
+        stride: stride,
+        maximumEdgeM: maximumEdgeM,
+        includeLowConfidence: includeLowConfidence
+      )
+
+      var depthPointCount = 0
+      var depthCount = 0
+      var anchorCount = 0
+      self.anchorQueue.sync {
+        if self.captureActive {
+          for (key, triangle) in batch.triangles {
+            if self.fusedDepthTriangles.count >= maximumStored,
+              self.fusedDepthTriangles[key] == nil
+            {
+              continue
+            }
+            self.fusedDepthTriangles[key] = triangle
+          }
+          self.fusedDepthPointSamples += batch.acceptedPointCount
+        }
+        self.depthProcessingInFlight = false
+        depthPointCount = self.fusedDepthPointSamples
+        depthCount = self.fusedDepthTriangles.count
+        anchorCount = self.meshAnchors.count
+      }
+
+      let source: String
+      if depthCount > 0 && anchorCount > 0 {
+        source = "LiDAR depth + AR mesh"
+      } else if depthCount > 0 {
+        source = "LiDAR depth"
+      } else if anchorCount > 0 {
+        source = "ARKit mesh"
+      } else {
+        source = "Waiting for geometry"
+      }
+
+      Task { @MainActor [weak self] in
+        guard let self else { return }
+        self.model?.updateCaptureDiagnostics(
+          depthPointCount: depthPointCount,
+          depthTriangleCount: depthCount,
+          sceneMeshAnchorCount: anchorCount,
+          source: source
+        )
+        self.requestSurfacePreview(force: true)
+      }
+    }
+  }
+
   @MainActor
   private func requestSurfacePreview(force: Bool = false) {
     guard
@@ -939,12 +1331,15 @@ final class ARScannerController: NSObject, ARSessionDelegate {
 
     lastPreviewRequestTime = now
     previewGenerationInFlight = true
-    let anchors = anchorQueue.sync { Array(meshAnchors.values) }
+    let captureSnapshot = anchorQueue.sync {
+      (Array(meshAnchors.values), Array(fusedDepthTriangles.values))
+    }
     let maxTriangles = maxPreviewTriangles
 
     previewQueue.async { [weak self] in
       let data = Self.buildSurfacePreview(
-        anchors: anchors,
+        anchors: captureSnapshot.0,
+        depthTriangles: captureSnapshot.1,
         context: context,
         maxTriangles: maxTriangles
       )
@@ -959,10 +1354,16 @@ final class ARScannerController: NSObject, ARSessionDelegate {
 
   private static func buildSurfacePreview(
     anchors: [ARMeshAnchor],
+    depthTriangles: [CandidateTriangle],
     context: MeshCropContext,
     maxTriangles: Int
   ) -> SurfacePreviewData {
-    let candidates = collectCandidateTriangles(anchors: anchors, context: context)
+    let candidates = combinedCandidates(
+      anchors: anchors,
+      depthTriangles: depthTriangles,
+      context: context,
+      maximumCount: max(maxTriangles * 3, 24_000)
+    )
     let isolation = isolateObjectTriangles(candidates, context: context)
     let triangles = isolation.triangles
 
@@ -1478,6 +1879,25 @@ final class ARScannerController: NSObject, ARSessionDelegate {
       }
     }
 
+    let nowForDepth = now
+    let shouldCaptureDepth = anchorQueue.sync { () -> Bool in
+      guard captureActive, depthFusionEnabled, !depthProcessingInFlight else { return false }
+      guard nowForDepth - lastDepthCaptureTime >= depthCaptureInterval else { return false }
+      depthProcessingInFlight = true
+      lastDepthCaptureTime = nowForDepth
+      return true
+    }
+
+    if shouldCaptureDepth {
+      if let snapshot = Self.makeDepthFrameSnapshot(from: frame) {
+        Task { @MainActor [weak self] in
+          self?.enqueueDepthSnapshot(snapshot)
+        }
+      } else {
+        anchorQueue.async { self.depthProcessingInFlight = false }
+      }
+    }
+
     let active = anchorQueue.sync { captureActive }
     if active {
       let cameraPosition = frame.camera.transform.translationVector
@@ -1509,8 +1929,19 @@ final class ARScannerController: NSObject, ARSessionDelegate {
         self.meshAnchors[anchor.identifier] = anchor
       }
       if self.captureActive {
+        let depthPointCount = self.fusedDepthPointSamples
+        let depthCount = self.fusedDepthTriangles.count
+        let anchorCount = self.meshAnchors.count
+        let source = depthCount > 0 ? "LiDAR depth + AR mesh" : "ARKit mesh"
         Task { @MainActor [weak self] in
-          self?.requestSurfacePreview()
+          guard let self else { return }
+          self.model?.updateCaptureDiagnostics(
+            depthPointCount: depthPointCount,
+            depthTriangleCount: depthCount,
+            sceneMeshAnchorCount: anchorCount,
+            source: source
+          )
+          self.requestSurfacePreview()
         }
       }
     }

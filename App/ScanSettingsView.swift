@@ -78,6 +78,35 @@ struct ScanSettingsView: View {
           .foregroundStyle(.secondary)
         }
 
+        Section("LiDAR depth fusion") {
+          Toggle("Fuse per-frame LiDAR depth", isOn: $model.depthFusionEnabled)
+
+          Picker("Depth sampling density", selection: $model.depthSamplingStride) {
+            Text("High").tag(3)
+            Text("Balanced").tag(4)
+            Text("Fast").tag(6)
+          }
+
+          VStack(alignment: .leading, spacing: 8) {
+            HStack {
+              Text("Maximum depth-triangle edge")
+              Spacer()
+              Text("\(model.depthMaximumEdgeMM, format: .number.precision(.fractionLength(0))) mm")
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+            }
+            Slider(value: $model.depthMaximumEdgeMM, in: 15...70, step: 5)
+          }
+
+          Toggle("Include low-confidence depth", isOn: $model.includeLowConfidenceDepth)
+
+          Text(
+            "Depth fusion converts sceneDepth from several camera views into surface triangles inside the four-point area. Low-confidence depth is enabled by default so small objects produce geometry. Turn it off if the teal surface becomes noisy or includes nearby clutter."
+          )
+          .font(.footnote)
+          .foregroundStyle(.secondary)
+        }
+
         Section("Surface visualization") {
           Toggle("Show detected object surface", isOn: $model.showCapturedSurface)
           Toggle("Show ground area and object bounds", isOn: $model.showBoundingBox)
