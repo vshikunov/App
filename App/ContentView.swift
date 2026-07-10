@@ -106,7 +106,7 @@ struct ContentView: View {
             .font(.subheadline.weight(.semibold))
             .lineLimit(1)
 
-          Text("4-POINT AREA • DEPTH FUSION")
+          Text("4-POINT AREA • TAP-TO-LOCK")
             .font(.caption2.weight(.bold))
             .foregroundStyle(.cyan)
             .lineLimit(1)
@@ -200,6 +200,16 @@ struct ContentView: View {
         }
       }
 
+      if model.groundAreaReady {
+        Section("Object selection") {
+          Button {
+            model.reselectObject()
+          } label: {
+            Label("Select a different object", systemImage: "hand.tap")
+          }
+        }
+      }
+
       Section("Fallback") {
         Button {
           model.setObjectCenter()
@@ -240,6 +250,8 @@ struct ContentView: View {
     switch model.workflowPhase {
     case .definingArea:
       definingAreaControls
+    case .selectingObject:
+      selectingObjectControls
     case .readyToScan:
       readyToScanControls
     case .scanning:
@@ -314,6 +326,52 @@ struct ContentView: View {
     }
   }
 
+  private var selectingObjectControls: some View {
+    VStack(spacing: 10) {
+      HStack(spacing: 10) {
+        Image(systemName: "hand.tap.fill")
+          .font(.title3)
+          .foregroundStyle(.cyan)
+
+        VStack(alignment: .leading, spacing: 3) {
+          Text("Select the object")
+            .font(.headline)
+          Text("Aim the center reticle at the cube or part itself. The touched 3D surface becomes the subject lock; background geometry is rejected.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .lineLimit(3)
+        }
+      }
+
+      HStack(spacing: 12) {
+        Button {
+          model.undoReferencePoint()
+        } label: {
+          Label("Edit Area", systemImage: "pencil")
+            .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.bordered)
+
+        Button {
+          model.selectObjectAtReticle()
+        } label: {
+          Label("Select Object", systemImage: "viewfinder.circle.fill")
+            .fontWeight(.semibold)
+            .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.borderedProminent)
+        .disabled(!model.reticleHasSurface)
+      }
+    }
+    .padding(12)
+    .frame(maxWidth: 440)
+    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+    .overlay {
+      RoundedRectangle(cornerRadius: 20, style: .continuous)
+        .stroke(.cyan.opacity(0.45), lineWidth: 1)
+    }
+  }
+
   private var readyToScanControls: some View {
     HStack(spacing: 12) {
       VStack(alignment: .leading, spacing: 3) {
@@ -364,7 +422,7 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 2) {
           Text(model.liveMeshDimensions == nil ? "Finding object in the area" : "Object isolated — capture all sides")
             .font(.subheadline.weight(.semibold))
-          Text("\(Int(model.scanCoveragePercent.rounded()))% views • \(model.captureDiagnosticsText)")
+          Text("\(Int(model.scanCoveragePercent.rounded()))% views • bounds \(Int(model.dimensionStabilityPercent.rounded()))% stable • \(model.captureDiagnosticsText)")
             .font(.caption2.monospacedDigit())
             .foregroundStyle(.secondary)
             .lineLimit(2)
@@ -523,6 +581,7 @@ struct ContentView: View {
   private var statusIcon: String {
     switch model.workflowPhase {
     case .definingArea: return "square.dashed"
+    case .selectingObject: return "hand.tap.fill"
     case .readyToScan: return "viewfinder"
     case .scanning: return "wave.3.right.circle.fill"
     case .review: return "eye.circle.fill"
@@ -534,6 +593,7 @@ struct ContentView: View {
   private var statusColor: Color {
     switch model.workflowPhase {
     case .definingArea: return model.reticleHasSurface ? .cyan : .orange
+    case .selectingObject: return model.reticleHasSurface ? .cyan : .orange
     case .readyToScan: return .green
     case .scanning: return .cyan
     case .review: return .blue
@@ -761,7 +821,7 @@ private struct GroundAreaHelpView: View {
     GroundAreaHelpStep(
       id: 4,
       title: "Final corner",
-      detail: "Close the 2D footprint around the object. 3D scanning starts immediately.",
+      detail: "Close the 2D footprint. Then aim the reticle at the object and tap Select Object.",
       color: .purple),
   ]
 
@@ -770,7 +830,7 @@ private struct GroundAreaHelpView: View {
       ScrollView {
         VStack(alignment: .leading, spacing: 16) {
           Text(
-            "The four points define only the ground area. ARKit then scans upward inside that footprint, removes the table/floor, and selects the largest connected 3D surface cluster as the object."
+            "The four points define the ground area. You then select the object with the reticle. The app locks to that 3D subject, removes the support plane, and rejects unrelated geometry."
           )
           .font(.subheadline)
           .foregroundStyle(.secondary)
@@ -794,7 +854,7 @@ private struct GroundAreaHelpView: View {
           }
 
           Label(
-            "After corner 4, move around all sides. The blue shape is the selected ground area, the teal mesh is the detected object, and the green box is its live measured extent.",
+            "After corner 4, select the object, then move around all sides. The blue shape is the ground area, the cyan marker is the subject lock, the teal mesh is the selected object, and the green box is its stabilized measured extent.",
             systemImage: "sparkles"
           )
           .font(.subheadline)

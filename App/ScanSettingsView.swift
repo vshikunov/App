@@ -16,7 +16,7 @@ struct ScanSettingsView: View {
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
             }
-            Slider(value: $model.footprintMarginMM, in: 0...12, step: 0.5)
+            Slider(value: $model.footprintMarginMM, in: 0...6, step: 0.5)
           }
 
           VStack(alignment: .leading, spacing: 8) {
@@ -31,7 +31,7 @@ struct ScanSettingsView: View {
           }
 
           Text(
-            "The four points define a 2D polygon on the support surface. The app scans upward only to the maximum height. Keep that value just above the expected part height."
+            "The four points define a 2D polygon on the support surface. Edge margin is capture-only and no longer increases the measured X/Z size. Keep Maximum Object Height just above the expected part height."
           )
           .font(.footnote)
           .foregroundStyle(.secondary)
@@ -68,11 +68,43 @@ struct ScanSettingsView: View {
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
             }
-            Slider(value: $model.objectMergeDistanceMM, in: 6...40, step: 1)
+            Slider(value: $model.objectMergeDistanceMM, in: 3...15, step: 0.5)
           }
 
           Text(
-            "The scanner removes floor/table triangles, builds connected surface clusters, selects the strongest object cluster, and merges nearby pieces within this distance. Reduce it when two separate objects are being joined."
+            "The scanner removes the support plane and follows the 3D component selected by the reticle. Merge distance is deliberately conservative so unrelated fragments cannot chain into the object."
+          )
+          .font(.footnote)
+          .foregroundStyle(.secondary)
+        }
+
+        Section("Tap-to-lock subject selection") {
+          VStack(alignment: .leading, spacing: 8) {
+            HStack {
+              Text("Object lock radius")
+              Spacer()
+              Text("\(model.objectLockRadiusMM, format: .number.precision(.fractionLength(0))) mm")
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+            }
+            Slider(value: $model.objectLockRadiusMM, in: 15...250, step: 5)
+          }
+
+          VStack(alignment: .leading, spacing: 8) {
+            HStack {
+              Text("Outlier trimming")
+              Spacer()
+              Text("\(model.outlierTrimPercent, format: .number.precision(.fractionLength(1)))%")
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+            }
+            Slider(value: $model.outlierTrimPercent, in: 0.5...8, step: 0.5)
+          }
+
+          Toggle("Use coarse AR room mesh as fallback", isOn: $model.useSceneMeshFallback)
+
+          Text(
+            "After the four ground points, aim at the object and tap Select Object. The app follows the touched 3D component, trims sparse depth rays with robust percentiles, and uses a rolling median for the displayed dimensions. Leave the room-mesh fallback off for small calibration parts."
           )
           .font(.footnote)
           .foregroundStyle(.secondary)
@@ -113,7 +145,7 @@ struct ScanSettingsView: View {
           Toggle("Show full-room debug mesh", isOn: $model.showMeshOverlay)
 
           Text(
-            "The teal overlay is the automatically isolated object surface. The blue outline is the selected ground area. The green wireframe is the detected object's live dimensional extent."
+            "The teal overlay is the selected subject surface. The blue outline is the ground area. The cyan marker is the subject lock. The green wireframe is the stabilized dimensional extent."
           )
           .font(.footnote)
           .foregroundStyle(.secondary)

@@ -49,6 +49,7 @@ private struct SurfacePreviewData {
   let triangleCount: Int
   let dimensionsMM: SIMD3<Double>?
   let componentCount: Int
+  let detectedBoundsLocal: RobustLocalBounds?
   let detectedCenterWorld: SIMD3<Float>?
   let detectedHalfExtentsM: SIMD3<Float>?
 }
@@ -67,6 +68,10 @@ private struct MeshCropContext {
   let minimumObjectHeightM: Float
   let mergeDistanceM: Float
   let removeSupportSurface: Bool
+  let objectSeedLocal: SIMD3<Float>?
+  let objectLockRadiusM: Float
+  let outlierTrimFraction: Float
+  let useSceneMeshFallback: Bool
 }
 
 private struct CandidateTriangle: Sendable {
@@ -85,6 +90,20 @@ private struct CandidateTriangle: Sendable {
 
   var localMax: SIMD3<Float> {
     simd_max(local0, simd_max(local1, local2))
+  }
+}
+
+private struct RobustLocalBounds: Sendable {
+  let minPoint: SIMD3<Float>
+  let maxPoint: SIMD3<Float>
+
+  var size: SIMD3<Float> { maxPoint - minPoint }
+  var center: SIMD3<Float> { (minPoint + maxPoint) / 2 }
+
+  func contains(_ point: SIMD3<Float>, padding: Float = 0) -> Bool {
+    point.x >= minPoint.x - padding && point.x <= maxPoint.x + padding
+      && point.y >= minPoint.y - padding && point.y <= maxPoint.y + padding
+      && point.z >= minPoint.z - padding && point.z <= maxPoint.z + padding
   }
 }
 
@@ -213,7 +232,12 @@ final class ARScannerController: NSObject, ARSessionDelegate {
   private var maximumObjectHeightM: Float = 0.6
   private var groundClearanceM: Float = 0.003
   private var minimumObjectHeightM: Float = 0.008
-  private var objectMergeDistanceM: Float = 0.018
+  private var objectMergeDistanceM: Float = 0.006
+  private var objectLockRadiusM: Float = 0.050
+  private var outlierTrimFraction: Float = 0.025
+  private var useSceneMeshFallback = false
+  private var selectedObjectSeedLocal: SIMD3<Float>?
+  private var selectedObjectSeedWorld: SIMD3<Float>?
 
   // RealityKit visual entities.
   private var referenceMarkerAnchors: [AnchorEntity] = []
@@ -221,6 +245,10 @@ final class ARScannerController: NSObject, ARSessionDelegate {
   private var detectedBoundsAnchor: AnchorEntity?
   private var capturedSurfaceAnchor: AnchorEntity?
   private var capturedSurfaceEntity: ModelEntity?
+  private var objectSelectionAnchor: AnchorEntity?
+  private var previewBoundsHistory: [RobustLocalBounds] = []
+  private let previewBoundsHistoryLimit = 7
+  private var stablePreviewBounds: RobustLocalBounds?
   private var capturedSurfaceVisible = true
   private var boundingBoxVisible = true
 
@@ -276,6 +304,8 @@ final class ARScannerController: NSObject, ARSessionDelegate {
       depthProcessingInFlight = false
       lastDepthCaptureTime = 0
     }
+    previewBoundsHistory.removeAll()
+    stablePreviewBounds = nil
     arView?.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
     setMeshOverlayVisible(showMeshOverlay)
     postStatus("Capture four ground corners clockwise around the object.")
@@ -311,6 +341,7 @@ final class ARScannerController: NSObject, ARSessionDelegate {
     boundingBoxVisible = visible
     boundingBoxAnchor?.isEnabled = visible
     detectedBoundsAnchor?.isEnabled = visible
+    objectSelectionAnchor?.isEnabled = visible
     for marker in referenceMarkerAnchors {
       marker.isEnabled = visible
     }
@@ -347,6 +378,97 @@ final class ARScannerController: NSObject, ARSessionDelegate {
       alignment: .any
     )
     return raycastResults.first?.worldTransform.translationVector
+  }
+
+  @MainActor
+  func lockObjectSelectionFromScreenCenter() -> Bool {
+    guard let point = captureWorldPointFromScreenCenter(),
+      let origin = objectReferenceOriginWorld,
+      groundFootprintPolygonXZ.count >= 3
+    else {
+      return false
+    }
+
+    let local = Self.worldToLocal(point, center: origin, basis: partBasisWorld)
+    guard local.y >= max(groundClearanceM * 0.5, 0.001),
+      local.y <= maximumObjectHeightM,
+      Self.pointInsideOrNearPolygon(
+        SIMD2<Float>(local.x, local.z),
+        polygon: groundFootprintPolygonXZ,
+        margin: min(footprintPaddingM, 0.003)
+      )
+    else {
+      return false
+    }
+
+    selectedObjectSeedLocal = local
+    selectedObjectSeedWorld = point
+    objectCenterWorld = point
+    clearCapturedGeometryKeepingArea()
+    renderObjectSelection(at: point)
+    return true
+  }
+
+  @MainActor
+  func clearObjectSelectionAndCapturedGeometry() {
+    selectedObjectSeedLocal = nil
+    selectedObjectSeedWorld = nil
+    objectCenterWorld = objectReferenceOriginWorld.map { origin in
+      origin
+        + partBasisWorld.columns.0 * (groundFootprintWidthM / 2)
+        + partBasisWorld.columns.1 * (maximumObjectHeightM / 2)
+        + partBasisWorld.columns.2 * (groundFootprintDepthM / 2)
+    }
+    clearCapturedGeometryKeepingArea()
+    if let arView, let objectSelectionAnchor {
+      arView.scene.removeAnchor(objectSelectionAnchor)
+    }
+    objectSelectionAnchor = nil
+  }
+
+  @MainActor
+  private func clearCapturedGeometryKeepingArea() {
+    anchorQueue.sync {
+      captureActive = false
+      fusedDepthTriangles.removeAll()
+      fusedDepthPointSamples = 0
+      depthProcessingInFlight = false
+      lastDepthCaptureTime = 0
+    }
+    coveredCameraSectors.removeAll()
+    previewBoundsHistory.removeAll()
+    stablePreviewBounds = nil
+    model?.scanCoveragePercent = 0
+    model?.clearLiveMeshDimensions()
+
+    guard let arView else { return }
+    if let detectedBoundsAnchor { arView.scene.removeAnchor(detectedBoundsAnchor) }
+    if let capturedSurfaceAnchor { arView.scene.removeAnchor(capturedSurfaceAnchor) }
+    detectedBoundsAnchor = nil
+    capturedSurfaceAnchor = nil
+    capturedSurfaceEntity = nil
+  }
+
+  @MainActor
+  private func renderObjectSelection(at point: SIMD3<Float>) {
+    guard let arView else { return }
+    if let objectSelectionAnchor { arView.scene.removeAnchor(objectSelectionAnchor) }
+
+    let root = AnchorEntity(world: point)
+    let dot = ModelEntity(
+      mesh: .generateSphere(radius: 0.0030),
+      materials: [SimpleMaterial(color: .systemCyan, isMetallic: false)]
+    )
+    root.addChild(dot)
+
+    let halo = ModelEntity(
+      mesh: .generateSphere(radius: 0.0085),
+      materials: [SimpleMaterial(color: UIColor.systemCyan.withAlphaComponent(0.20), isMetallic: false)]
+    )
+    root.addChild(halo)
+    root.isEnabled = boundingBoxVisible
+    arView.scene.addAnchor(root)
+    objectSelectionAnchor = root
   }
 
   @MainActor
@@ -395,17 +517,25 @@ final class ARScannerController: NSObject, ARSessionDelegate {
     if let capturedSurfaceAnchor {
       arView.scene.removeAnchor(capturedSurfaceAnchor)
     }
+    if let objectSelectionAnchor {
+      arView.scene.removeAnchor(objectSelectionAnchor)
+    }
 
     boundingBoxAnchor = nil
     detectedBoundsAnchor = nil
     capturedSurfaceAnchor = nil
     capturedSurfaceEntity = nil
+    objectSelectionAnchor = nil
+    selectedObjectSeedLocal = nil
+    selectedObjectSeedWorld = nil
     objectCenterWorld = nil
     objectReferenceOriginWorld = nil
     groundFootprintPolygonXZ = []
     groundFootprintWidthM = 0
     groundFootprintDepthM = 0
     coveredCameraSectors.removeAll()
+    previewBoundsHistory.removeAll()
+    stablePreviewBounds = nil
 
     anchorQueue.sync {
       captureActive = false
@@ -429,16 +559,24 @@ final class ARScannerController: NSObject, ARSessionDelegate {
     if let capturedSurfaceAnchor {
       arView.scene.removeAnchor(capturedSurfaceAnchor)
     }
+    if let objectSelectionAnchor {
+      arView.scene.removeAnchor(objectSelectionAnchor)
+    }
     boundingBoxAnchor = nil
     detectedBoundsAnchor = nil
     capturedSurfaceAnchor = nil
     capturedSurfaceEntity = nil
+    objectSelectionAnchor = nil
+    selectedObjectSeedLocal = nil
+    selectedObjectSeedWorld = nil
     objectCenterWorld = nil
     objectReferenceOriginWorld = nil
     groundFootprintPolygonXZ = []
     groundFootprintWidthM = 0
     groundFootprintDepthM = 0
     coveredCameraSectors.removeAll()
+    previewBoundsHistory.removeAll()
+    stablePreviewBounds = nil
     var sceneAnchorCount = 0
     anchorQueue.sync {
       captureActive = false
@@ -547,7 +685,9 @@ final class ARScannerController: NSObject, ARSessionDelegate {
     maximumObjectHeightM = max(Float(maximumHeightMM / 1000), 0.03)
     groundClearanceM = max(Float(groundClearanceMM / 1000), 0.001)
     minimumObjectHeightM = max(Float(minimumObjectHeightMM / 1000), 0.003)
-    objectMergeDistanceM = max(Float(mergeDistanceMM / 1000), 0.006)
+    objectMergeDistanceM = max(Float(mergeDistanceMM / 1000), 0.003)
+    selectedObjectSeedLocal = nil
+    selectedObjectSeedWorld = nil
 
     renderGroundFootprint(polygon: polygonFromOrigin)
     requestSurfacePreview(force: true)
@@ -565,6 +705,8 @@ final class ARScannerController: NSObject, ARSessionDelegate {
   func beginCapture(resetCoverage: Bool) {
     if resetCoverage {
       coveredCameraSectors.removeAll()
+      previewBoundsHistory.removeAll()
+      stablePreviewBounds = nil
       model?.scanCoveragePercent = 0
     }
 
@@ -572,6 +714,9 @@ final class ARScannerController: NSObject, ARSessionDelegate {
     depthSamplingStride = max(min(model?.depthSamplingStride ?? 4, 10), 2)
     depthMaximumEdgeM = max(Float((model?.depthMaximumEdgeMM ?? 35) / 1000), 0.010)
     includeLowConfidenceDepth = model?.includeLowConfidenceDepth ?? true
+    objectLockRadiusM = max(Float((model?.objectLockRadiusMM ?? 50) / 1000), 0.012)
+    outlierTrimFraction = min(max(Float((model?.outlierTrimPercent ?? 2.5) / 100), 0), 0.10)
+    useSceneMeshFallback = model?.useSceneMeshFallback ?? false
 
     let currentMeshAnchors =
       arView?.session.currentFrame?.anchors.compactMap { $0 as? ARMeshAnchor } ?? []
@@ -710,7 +855,11 @@ final class ARScannerController: NSObject, ARSessionDelegate {
         groundClearanceM: groundClearanceM,
         minimumObjectHeightM: minimumObjectHeightM,
         mergeDistanceM: objectMergeDistanceM,
-        removeSupportSurface: true
+        removeSupportSurface: true,
+        objectSeedLocal: selectedObjectSeedLocal,
+        objectLockRadiusM: objectLockRadiusM,
+        outlierTrimFraction: outlierTrimFraction,
+        useSceneMeshFallback: useSceneMeshFallback
       )
     }
 
@@ -737,7 +886,11 @@ final class ARScannerController: NSObject, ARSessionDelegate {
       groundClearanceM: 0,
       minimumObjectHeightM: 0.003,
       mergeDistanceM: objectMergeDistanceM,
-      removeSupportSurface: false
+      removeSupportSurface: false,
+      objectSeedLocal: selectedObjectSeedLocal,
+      objectLockRadiusM: objectLockRadiusM,
+      outlierTrimFraction: outlierTrimFraction,
+      useSceneMeshFallback: useSceneMeshFallback
     )
   }
 
@@ -769,6 +922,9 @@ final class ARScannerController: NSObject, ARSessionDelegate {
 
         let centroidXZ = SIMD2<Float>(centroid.x, centroid.z)
         guard pointInsidePolygon(centroidXZ, polygon: context.footprintPolygonXZ) else {
+          continue
+        }
+        guard pointInsideSubjectLock(centroid, context: context) else {
           continue
         }
 
@@ -855,6 +1011,27 @@ final class ARScannerController: NSObject, ARSessionDelegate {
     return false
   }
 
+  private static func pointInsideSubjectLock(
+    _ point: SIMD3<Float>,
+    context: MeshCropContext
+  ) -> Bool {
+    guard let seed = context.objectSeedLocal else { return true }
+
+    // The selected depth point acts like a 3D version of Photos subject hit-testing.
+    // Use an ellipsoidal lock volume around that point before component analysis so
+    // remote walls, shelves, hands, and tall depth rays never enter the candidate mesh.
+    let radius = max(context.objectLockRadiusM, 0.015)
+    let horizontalAllowance = radius * 1.35
+    let verticalAllowance = radius * 1.60
+    let delta = point - seed
+    let normalized = SIMD3<Float>(
+      delta.x / horizontalAllowance,
+      delta.y / verticalAllowance,
+      delta.z / horizontalAllowance
+    )
+    return simd_length_squared(normalized) <= 1
+  }
+
   private static func isolateObjectTriangles(
     _ candidates: [CandidateTriangle],
     context: MeshCropContext
@@ -865,8 +1042,10 @@ final class ARScannerController: NSObject, ARSessionDelegate {
     }
 
     var unionFind = UnionFind(count: candidates.count)
-    let tolerance = max(context.mergeDistanceM, 0.008)
-    let cellSize = max(min(tolerance * 0.65, 0.014), 0.005)
+    // Keep connectivity conservative. Large merge distances can chain a tabletop object
+    // to stray depth rays or room geometry and make the box grow without limit.
+    let tolerance = min(max(context.mergeDistanceM, 0.0035), 0.010)
+    let cellSize = max(min(tolerance * 0.65, 0.007), 0.003)
     let neighborRadius = max(Int(ceil(tolerance / cellSize)), 1)
     let toleranceSquared = tolerance * tolerance
     var cells: [SpatialKey: [VertexLink]] = [:]
@@ -880,7 +1059,7 @@ final class ARScannerController: NSObject, ARSessionDelegate {
             for dz in -neighborRadius...neighborRadius {
               let neighbor = SpatialKey(x: key.x + dx, y: key.y + dy, z: key.z + dz)
               guard let links = cells[neighbor] else { continue }
-              for link in links.prefix(16)
+              for link in links.prefix(14)
               where simd_length_squared(link.point - point) <= toleranceSquared
               {
                 unionFind.union(triangleIndex, link.triangleIndex)
@@ -888,7 +1067,7 @@ final class ARScannerController: NSObject, ARSessionDelegate {
             }
           }
         }
-        if cells[key, default: []].count < 20 {
+        if cells[key, default: []].count < 18 {
           cells[key, default: []].append(VertexLink(triangleIndex: triangleIndex, point: point))
         }
       }
@@ -927,49 +1106,66 @@ final class ARScannerController: NSObject, ARSessionDelegate {
         ))
     }
 
+    let footprintDiagonal = max(hypot(context.footprintWidthM, context.footprintDepthM), 0.03)
+    let groundContactLimit = max(context.groundClearanceM + 0.018, min(footprintDiagonal * 0.45, 0.040))
     let valid = components.filter { component in
       component.triangleCount >= 3
-        && component.surfaceAreaM2 > 0.000005
+        && component.surfaceAreaM2 > 0.000004
         && component.maxPoint.y >= context.minimumObjectHeightM
-        && component.heightM >= context.minimumObjectHeightM * 0.45
+        && component.heightM >= context.minimumObjectHeightM * 0.35
+        && component.minPoint.y <= groundContactLimit
     }
 
-    guard !valid.isEmpty else {
-      let totalMin = candidates.reduce(SIMD3<Float>(repeating: Float.greatestFiniteMagnitude)) {
-        simd_min($0, $1.localMin)
-      }
-      let totalMax = candidates.reduce(SIMD3<Float>(repeating: -Float.greatestFiniteMagnitude)) {
-        simd_max($0, $1.localMax)
-      }
-      guard totalMax.y - totalMin.y >= context.minimumObjectHeightM else { return ([], 0) }
-      return (candidates, 1)
-    }
+    guard !valid.isEmpty else { return ([], 0) }
 
     let footprintCenter = SIMD2<Float>(context.footprintWidthM / 2, context.footprintDepthM / 2)
-    let footprintDiagonal = max(hypot(context.footprintWidthM, context.footprintDepthM), 0.03)
-
-    guard let primary = valid.max(by: { lhs, rhs in
-      componentScore(lhs, footprintCenter: footprintCenter, footprintDiagonal: footprintDiagonal)
-        < componentScore(rhs, footprintCenter: footprintCenter, footprintDiagonal: footprintDiagonal)
-    }) else {
-      return ([], 0)
+    let primary: ComponentInfo?
+    if let seed = context.objectSeedLocal {
+      let seedCandidates = valid.filter {
+        distance(seed, toBoxMin: $0.minPoint, max: $0.maxPoint) <= context.objectLockRadiusM
+      }
+      guard !seedCandidates.isEmpty else { return ([], valid.count) }
+      primary = seedCandidates.max(by: { lhs, rhs in
+        subjectLockedScore(
+          lhs,
+          seed: seed,
+          footprintCenter: footprintCenter,
+          footprintDiagonal: footprintDiagonal,
+          lockRadius: context.objectLockRadiusM
+        ) < subjectLockedScore(
+          rhs,
+          seed: seed,
+          footprintCenter: footprintCenter,
+          footprintDiagonal: footprintDiagonal,
+          lockRadius: context.objectLockRadiusM
+        )
+      })
+    } else {
+      primary = valid.max(by: { lhs, rhs in
+        componentScore(lhs, footprintCenter: footprintCenter, footprintDiagonal: footprintDiagonal)
+          < componentScore(rhs, footprintCenter: footprintCenter, footprintDiagonal: footprintDiagonal)
+      })
     }
 
+    guard let primary else { return ([], 0) }
+
+    // Merge only pieces directly adjacent to the selected subject. Do not recursively
+    // chain through fragments because that is what caused the vertical box explosion.
+    let directMergeLimit = min(max(context.mergeDistanceM, 0.0035), 0.009)
     var selectedRoots: Set<Int> = [primary.root]
-    var changed = true
-    while changed {
-      changed = false
-      for component in valid where !selectedRoots.contains(component.root) {
-        let shouldMerge = valid.contains { selected in
-          selectedRoots.contains(selected.root)
-            && componentBoxDistance(component, selected) <= context.mergeDistanceM * 1.5
-        }
-        let meaningful = component.surfaceAreaM2 >= primary.surfaceAreaM2 * 0.008
-          || component.heightM >= context.minimumObjectHeightM
-        if shouldMerge && meaningful {
-          selectedRoots.insert(component.root)
-          changed = true
-        }
+    for component in valid where component.root != primary.root {
+      let closeToPrimary = componentBoxDistance(component, primary) <= directMergeLimit
+      let closeToSeed: Bool
+      if let seed = context.objectSeedLocal {
+        closeToSeed = distance(seed, toBoxMin: component.minPoint, max: component.maxPoint)
+          <= context.objectLockRadiusM * 1.25
+      } else {
+        closeToSeed = true
+      }
+      let meaningful = component.surfaceAreaM2 >= primary.surfaceAreaM2 * 0.015
+        || component.triangleCount >= max(primary.triangleCount / 80, 8)
+      if closeToPrimary && closeToSeed && meaningful {
+        selectedRoots.insert(component.root)
       }
     }
 
@@ -980,7 +1176,194 @@ final class ARScannerController: NSObject, ARSessionDelegate {
     let selectedTriangles = candidates.enumerated().compactMap { index, triangle in
       selectedSet.contains(index) ? triangle : nil
     }
-    return (selectedTriangles, selectedRoots.count)
+
+    let trimmed = trimOutlierTriangles(selectedTriangles, context: context)
+    return (trimmed, selectedRoots.count)
+  }
+
+  private static func subjectLockedScore(
+    _ component: ComponentInfo,
+    seed: SIMD3<Float>,
+    footprintCenter: SIMD2<Float>,
+    footprintDiagonal: Float,
+    lockRadius: Float
+  ) -> Float {
+    let seedDistance = distance(seed, toBoxMin: component.minPoint, max: component.maxPoint)
+    let seedWeight = max(0.02, 1 - seedDistance / max(lockRadius, 0.012))
+    let horizontal = SIMD2<Float>(component.centroid.x, component.centroid.z)
+    let centerDistance = simd_length(horizontal - footprintCenter)
+    let centerWeight = max(0.25, 1 - centerDistance / max(footprintDiagonal, 0.03))
+    let groundWeight = 1 / (1 + max(component.minPoint.y, 0) * 18)
+    let compactness = component.surfaceAreaM2 / max(
+      component.heightM * max(component.maxPoint.x - component.minPoint.x, 0.004)
+        * max(component.maxPoint.z - component.minPoint.z, 0.004),
+      0.000001
+    )
+    return component.surfaceAreaM2 * seedWeight * centerWeight * groundWeight
+      * (1 + min(compactness, 2.0) * 0.08)
+  }
+
+  private static func distance(
+    _ point: SIMD3<Float>,
+    toBoxMin minPoint: SIMD3<Float>,
+    max maxPoint: SIMD3<Float>
+  ) -> Float {
+    let dx = max(max(minPoint.x - point.x, point.x - maxPoint.x), 0)
+    let dy = max(max(minPoint.y - point.y, point.y - maxPoint.y), 0)
+    let dz = max(max(minPoint.z - point.z, point.z - maxPoint.z), 0)
+    return sqrt(dx * dx + dy * dy + dz * dz)
+  }
+
+  private static func trimOutlierTriangles(
+    _ triangles: [CandidateTriangle],
+    context: MeshCropContext
+  ) -> [CandidateTriangle] {
+    guard triangles.count >= 12 else { return triangles }
+    guard let bounds = robustBounds(for: triangles, context: context) else { return triangles }
+
+    let padding = max(0.0008, min(context.mergeDistanceM * 0.20, 0.0018))
+    let kept = triangles.filter { triangle in
+      bounds.contains(triangle.centroid, padding: padding)
+        && [triangle.local0, triangle.local1, triangle.local2].allSatisfy {
+          bounds.contains($0, padding: padding * 1.5)
+        }
+    }
+    return kept.count >= max(Int(Double(triangles.count) * 0.45), 8) ? kept : triangles
+  }
+
+  private static func robustBounds(
+    for triangles: [CandidateTriangle],
+    context: MeshCropContext
+  ) -> RobustLocalBounds? {
+    guard !triangles.isEmpty else { return nil }
+    let maximumSamples = 12_000
+    let sampleStep = max(triangles.count * 3 / maximumSamples, 1)
+    var xs: [Float] = []
+    var ys: [Float] = []
+    var zs: [Float] = []
+    xs.reserveCapacity(min(triangles.count * 3, maximumSamples))
+    ys.reserveCapacity(xs.capacity)
+    zs.reserveCapacity(xs.capacity)
+
+    var index = 0
+    for triangle in triangles {
+      for point in [triangle.local0, triangle.local1, triangle.local2] {
+        if index.isMultiple(of: sampleStep) {
+          xs.append(point.x)
+          ys.append(point.y)
+          zs.append(point.z)
+        }
+        index += 1
+      }
+    }
+    guard xs.count >= 8 else { return nil }
+    xs.sort(); ys.sort(); zs.sort()
+
+    let trim = min(max(context.outlierTrimFraction, 0.005), 0.10)
+    let lowX = percentile(xs, trim)
+    let highX = percentile(xs, 1 - trim)
+    let percentileHighY = percentile(ys, 1 - trim)
+    let highY = groundedTopHeight(samples: ys, fallback: percentileHighY, context: context)
+    let lowZ = percentile(zs, trim)
+    let highZ = percentile(zs, 1 - trim)
+
+    // Capture margin helps retain edge triangles, but it must never inflate measured
+    // dimensions. Clamp X/Z to the actual four-point footprint, not the padded prism.
+    let minPoint = SIMD3<Float>(
+      max(0, min(lowX, context.footprintWidthM)),
+      0,
+      max(0, min(lowZ, context.footprintDepthM))
+    )
+    let maxPoint = SIMD3<Float>(
+      max(minPoint.x, min(highX, context.footprintWidthM)),
+      max(context.minimumObjectHeightM, min(highY, context.maximumHeightM)),
+      max(minPoint.z, min(highZ, context.footprintDepthM))
+    )
+    guard maxPoint.x - minPoint.x > 0.002,
+      maxPoint.y > context.minimumObjectHeightM * 0.5,
+      maxPoint.z - minPoint.z > 0.002
+    else { return nil }
+    return RobustLocalBounds(minPoint: minPoint, maxPoint: maxPoint)
+  }
+
+  private static func groundedTopHeight(
+    samples: [Float],
+    fallback: Float,
+    context: MeshCropContext
+  ) -> Float {
+    guard samples.count >= 24 else { return fallback }
+    let footprintDiagonal = max(hypot(context.footprintWidthM, context.footprintDepthM), 0.025)
+    let binWidth = min(max(footprintDiagonal / 24, 0.0015), 0.0030)
+    let binCount = max(Int(ceil(context.maximumHeightM / binWidth)), 1)
+    var bins = Array(repeating: 0, count: binCount)
+    for value in samples where value >= 0 && value <= context.maximumHeightM {
+      let index = min(max(Int(value / binWidth), 0), binCount - 1)
+      bins[index] += 1
+    }
+    guard let peak = bins.max(), peak > 0 else { return fallback }
+
+    var smoothed = Array(repeating: 0, count: binCount)
+    for index in bins.indices {
+      var total = bins[index]
+      if index > 0 { total += bins[index - 1] }
+      if index + 1 < bins.count { total += bins[index + 1] }
+      smoothed[index] = total
+    }
+    let threshold = max(3, Int(Double(smoothed.max() ?? peak) * 0.055))
+    let maximumInitialGap = max(Int(ceil(0.014 / binWidth)), 3)
+    var started = false
+    var initialGap = 0
+    var gap = 0
+    var lastStrong = 0
+    let stopGapBins = max(Int(ceil(0.010 / binWidth)), 4)
+
+    for index in smoothed.indices {
+      if smoothed[index] >= threshold {
+        started = true
+        gap = 0
+        lastStrong = index
+      } else if started {
+        gap += 1
+        if gap >= stopGapBins { break }
+      } else {
+        initialGap += 1
+        if initialGap > maximumInitialGap { break }
+      }
+    }
+
+    guard started else { return fallback }
+
+    // Three-bin smoothing intentionally bridges tiny LiDAR holes, but it extends the
+    // detected band by roughly one bin. Re-estimate the top from the original samples
+    // inside that first dense band instead of using the smoothed bin edge directly.
+    let denseCutoff = min(Float(lastStrong + 1) * binWidth, context.maximumHeightM)
+    let denseSamples = samples.filter { $0 >= 0 && $0 <= denseCutoff }
+    let densityTop = denseSamples.isEmpty
+      ? denseCutoff
+      : min(denseCutoff, percentile(denseSamples, 0.985) + 0.00025)
+    guard densityTop >= max(context.minimumObjectHeightM, 0.005) else { return fallback }
+
+    // Use the first dense grounded band only when the samples above it are a minority.
+    // That distinguishes a real tall object from a small part plus sparse depth rays.
+    let upperSampleCount = samples.reduce(into: 0) { count, value in
+      if value > densityTop { count += 1 }
+    }
+    let upperFraction = Double(upperSampleCount) / Double(max(samples.count, 1))
+    if densityTop < fallback * 0.88 && upperFraction <= 0.22 {
+      return densityTop
+    }
+    return fallback
+  }
+
+  private static func percentile(_ sorted: [Float], _ fraction: Float) -> Float {
+    guard !sorted.isEmpty else { return 0 }
+    let clamped = min(max(fraction, 0), 1)
+    let position = clamped * Float(sorted.count - 1)
+    let lower = Int(floor(position))
+    let upper = Int(ceil(position))
+    if lower == upper { return sorted[lower] }
+    let weight = position - Float(lower)
+    return sorted[lower] * (1 - weight) + sorted[upper] * weight
   }
 
   private static func componentScore(
@@ -991,8 +1374,8 @@ final class ARScannerController: NSObject, ARSessionDelegate {
     let horizontal = SIMD2<Float>(component.centroid.x, component.centroid.z)
     let distance = simd_length(horizontal - footprintCenter)
     let centerWeight = max(0.35, 1 - distance / (footprintDiagonal * 0.8))
-    let heightWeight = 1 + min(component.heightM / 0.10, 2.5)
-    return component.surfaceAreaM2 * heightWeight * centerWeight
+    let groundWeight = 1 / (1 + max(component.minPoint.y, 0) * 16)
+    return component.surfaceAreaM2 * centerWeight * groundWeight
   }
 
   private static func componentBoxDistance(_ a: ComponentInfo, _ b: ComponentInfo) -> Float {
@@ -1029,14 +1412,20 @@ final class ARScannerController: NSObject, ARSessionDelegate {
     context: MeshCropContext,
     maximumCount: Int
   ) -> [CandidateTriangle] {
-    let sceneTriangles = collectCandidateTriangles(anchors: anchors, context: context)
+    let shouldUseSceneMesh = context.useSceneMeshFallback || depthTriangles.isEmpty
+    let sceneTriangles = shouldUseSceneMesh
+      ? collectCandidateTriangles(anchors: anchors, context: context)
+      : []
     var combined: [CandidateTriangle] = []
     combined.reserveCapacity(min(depthTriangles.count + sceneTriangles.count, maximumCount))
 
-    // Per-frame scene depth is preferred for small objects. The ARKit scene mesh
-    // remains useful for filling larger surfaces, so add both and deduplicate them.
+    // For small tabletop parts, per-frame depth is substantially finer than ARKit's
+    // coarse room mesh. Use the room mesh only as an explicit fallback; otherwise it
+    // can connect the part to a wall, shelf, or overhead surface.
     combined.append(contentsOf: depthTriangles)
-    combined.append(contentsOf: sceneTriangles)
+    if shouldUseSceneMesh {
+      combined.append(contentsOf: sceneTriangles)
+    }
     guard !combined.isEmpty else { return [] }
 
     let quantizationM: Float = 0.003
@@ -1160,7 +1549,8 @@ final class ARScannerController: NSObject, ARSessionDelegate {
             SIMD2<Float>(local.x, local.z),
             polygon: context.footprintPolygonXZ,
             margin: context.footprintPaddingM
-          )
+          ),
+          pointInsideSubjectLock(local, context: context)
         else {
           continue
         }
@@ -1374,16 +1764,22 @@ final class ARScannerController: NSObject, ARSessionDelegate {
         triangleCount: 0,
         dimensionsMM: nil,
         componentCount: 0,
+        detectedBoundsLocal: nil,
         detectedCenterWorld: nil,
         detectedHalfExtentsM: nil
       )
     }
 
-    var minReference = SIMD3<Float>(repeating: Float.greatestFiniteMagnitude)
-    var maxReference = SIMD3<Float>(repeating: -Float.greatestFiniteMagnitude)
-    for triangle in triangles {
-      minReference = simd_min(minReference, triangle.localMin)
-      maxReference = simd_max(maxReference, triangle.localMax)
+    let measurementBounds = robustBounds(for: triangles, context: context)
+    var minReference = measurementBounds?.minPoint
+      ?? SIMD3<Float>(repeating: Float.greatestFiniteMagnitude)
+    var maxReference = measurementBounds?.maxPoint
+      ?? SIMD3<Float>(repeating: -Float.greatestFiniteMagnitude)
+    if measurementBounds == nil {
+      for triangle in triangles {
+        minReference = simd_min(minReference, triangle.localMin)
+        maxReference = simd_max(maxReference, triangle.localMax)
+      }
     }
 
     let outputCount = min(triangles.count, maxTriangles)
@@ -1424,14 +1820,91 @@ final class ARScannerController: NSObject, ARSessionDelegate {
       triangleCount: triangles.count,
       dimensionsMM: dimensionsMM,
       componentCount: isolation.componentCount,
+      detectedBoundsLocal: measurementBounds,
       detectedCenterWorld: centerWorld,
       detectedHalfExtentsM: sizeM / 2
     )
   }
 
   @MainActor
+  private func stabilizedPreviewBounds(
+    with candidate: RobustLocalBounds?
+  ) -> RobustLocalBounds? {
+    guard let candidate else { return stablePreviewBounds }
+
+    if let stable = stablePreviewBounds, previewBoundsHistory.count >= 3 {
+      let previousSize = stable.size
+      let candidateSize = candidate.size
+      let explosive = Self.isExplosivePreviewGrowth(candidateSize.x, previousSize.x)
+        || Self.isExplosivePreviewGrowth(candidateSize.y, previousSize.y)
+        || Self.isExplosivePreviewGrowth(candidateSize.z, previousSize.z)
+      let centerJump = simd_length(candidate.center - stable.center)
+        > max(objectLockRadiusM * 0.55, 0.018)
+      if explosive || centerJump {
+        return stable
+      }
+    }
+
+    previewBoundsHistory.append(candidate)
+    if previewBoundsHistory.count > previewBoundsHistoryLimit {
+      previewBoundsHistory.removeFirst(previewBoundsHistory.count - previewBoundsHistoryLimit)
+    }
+
+    let stable = RobustLocalBounds(
+      minPoint: SIMD3<Float>(
+        Self.medianFloat(previewBoundsHistory.map { $0.minPoint.x }),
+        0,
+        Self.medianFloat(previewBoundsHistory.map { $0.minPoint.z })
+      ),
+      maxPoint: SIMD3<Float>(
+        Self.medianFloat(previewBoundsHistory.map { $0.maxPoint.x }),
+        Self.medianFloat(previewBoundsHistory.map { $0.maxPoint.y }),
+        Self.medianFloat(previewBoundsHistory.map { $0.maxPoint.z })
+      )
+    )
+    stablePreviewBounds = stable
+    return stable
+  }
+
+  private static func isExplosivePreviewGrowth(_ candidate: Float, _ previous: Float) -> Bool {
+    candidate > previous * 1.45 + 0.006
+  }
+
+  private static func medianFloat(_ values: [Float]) -> Float {
+    guard !values.isEmpty else { return 0 }
+    let sorted = values.sorted()
+    let middle = sorted.count / 2
+    if sorted.count.isMultiple(of: 2) {
+      return (sorted[middle - 1] + sorted[middle]) / 2
+    }
+    return sorted[middle]
+  }
+
+  @MainActor
   private func applySurfacePreview(_ data: SurfacePreviewData) {
-    if let dimensions = data.dimensionsMM {
+    let displayBounds = stabilizedPreviewBounds(with: data.detectedBoundsLocal)
+
+    if let bounds = displayBounds, let origin = objectReferenceOriginWorld {
+      let sizeM = bounds.size
+      model?.updateLiveMeshDimensions(
+        widthMM: Double(sizeM.x) * 1000,
+        heightMM: Double(sizeM.y) * 1000,
+        depthMM: Double(sizeM.z) * 1000,
+        triangleCount: data.triangleCount,
+        componentCount: data.componentCount
+      )
+
+      let center = Self.localToWorld(
+        bounds.center,
+        origin: origin,
+        basis: partBasisWorld
+      )
+      objectCenterWorld = center
+      renderDetectedBounds(center: center, halfExtents: sizeM / 2)
+    } else if let dimensions = data.dimensionsMM,
+      let center = data.detectedCenterWorld,
+      let half = data.detectedHalfExtentsM
+    {
       model?.updateLiveMeshDimensions(
         widthMM: dimensions.x,
         heightMM: dimensions.y,
@@ -1439,17 +1912,16 @@ final class ARScannerController: NSObject, ARSessionDelegate {
         triangleCount: data.triangleCount,
         componentCount: data.componentCount
       )
+      objectCenterWorld = center
+      renderDetectedBounds(center: center, halfExtents: half)
     } else {
       model?.clearLiveMeshDimensions()
+      if let arView, let detectedBoundsAnchor {
+        arView.scene.removeAnchor(detectedBoundsAnchor)
+        self.detectedBoundsAnchor = nil
+      }
     }
     guard let arView else { return }
-
-    if let center = data.detectedCenterWorld, let half = data.detectedHalfExtentsM {
-      renderDetectedBounds(center: center, halfExtents: half)
-    } else if let detectedBoundsAnchor {
-      arView.scene.removeAnchor(detectedBoundsAnchor)
-      self.detectedBoundsAnchor = nil
-    }
 
     if data.positions.isEmpty {
       capturedSurfaceEntity?.removeFromParent()

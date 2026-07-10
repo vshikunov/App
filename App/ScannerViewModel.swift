@@ -50,6 +50,7 @@ struct STLDimensionSummary: Equatable {
 
 enum ScannerWorkflowPhase: Equatable {
   case definingArea
+  case selectingObject
   case readyToScan
   case scanning
   case review
@@ -71,11 +72,18 @@ final class ScannerViewModel: ObservableObject {
   @Published var scanVolumeZMM: Double = 200.0
 
   // Automatic area/object isolation settings.
-  @Published var footprintMarginMM: Double = 8.0
-  @Published var maximumObjectHeightMM: Double = 600.0
-  @Published var groundClearanceMM: Double = 3.0
-  @Published var minimumObjectHeightMM: Double = 4.0
-  @Published var objectMergeDistanceMM: Double = 18.0
+  @Published var footprintMarginMM: Double = 1.5
+  @Published var maximumObjectHeightMM: Double = 300.0
+  @Published var groundClearanceMM: Double = 2.0
+  @Published var minimumObjectHeightMM: Double = 3.0
+  @Published var objectMergeDistanceMM: Double = 6.0
+
+  // Photos-style tap-to-lock selection and robust measurement filtering.
+  @Published var objectSelectionLocked: Bool = false
+  @Published var objectLockRadiusMM: Double = 50.0
+  @Published var outlierTrimPercent: Double = 2.5
+  @Published var useSceneMeshFallback: Bool = false
+  @Published var dimensionStabilityPercent: Double = 0
 
   // Per-frame LiDAR depth fusion. This is the reliable fallback when ARKit's coarse
   // scene-reconstruction mesh does not resolve a small tabletop object.
@@ -124,6 +132,9 @@ final class ScannerViewModel: ObservableObject {
 
   weak var arController: ARScannerController?
 
+  private var dimensionHistory: [STLDimensionSummary] = []
+  private let dimensionHistoryLimit = 7
+
   private let referencePointLabels = [
     "Ground corner 1",
     "Ground corner 2",
@@ -135,13 +146,14 @@ final class ScannerViewModel: ObservableObject {
     "Aim at the ground just outside the object, then tap Add.",
     "Move clockwise to the next ground corner.",
     "Continue clockwise around the object footprint.",
-    "Capture the final corner. Scanning starts automatically.",
+    "Capture the final corner, then select the object with the reticle.",
   ]
 
   var workflowPhase: ScannerWorkflowPhase {
     if isGeneratingSTL { return .processing }
     if lastSTLURL != nil { return .exported }
     if isScanning { return .scanning }
+    if groundAreaReady && !objectSelectionLocked { return .selectingObject }
     if groundAreaReady {
       return hasStartedSurfaceScan ? .review : .readyToScan
     }
@@ -157,7 +169,7 @@ final class ScannerViewModel: ObservableObject {
 
   var nextReferencePointInstruction: String {
     guard referencePoints.count < referencePointInstructions.count else {
-      return "The blue footprint now limits automatic object detection."
+      return "Aim at the object itself and tap Select Object."
     }
     return referencePointInstructions[referencePoints.count]
   }
@@ -184,6 +196,8 @@ final class ScannerViewModel: ObservableObject {
     switch workflowPhase {
     case .definingArea:
       return "\(nextReferencePointLabel) • \(referenceProgressText)"
+    case .selectingObject:
+      return "Aim at the object • Tap Select"
     case .readyToScan:
       return "Ground area ready • Start scan"
     case .scanning:
@@ -265,6 +279,9 @@ final class ScannerViewModel: ObservableObject {
     hasStartedSurfaceScan = false
     groundAreaReady = false
     groundAreaSummary = nil
+    objectSelectionLocked = false
+    dimensionHistory.removeAll()
+    dimensionStabilityPercent = 0
     capturedSurfaceTriangleCount = 0
     scanCoveragePercent = 0
     liveMeshDimensions = nil
@@ -294,6 +311,9 @@ final class ScannerViewModel: ObservableObject {
     objectCenterIsSet = false
     groundAreaReady = false
     groundAreaSummary = nil
+    objectSelectionLocked = false
+    dimensionHistory.removeAll()
+    dimensionStabilityPercent = 0
     scanCoveragePercent = 0
     capturedSurfaceTriangleCount = 0
     liveMeshDimensions = nil
@@ -341,12 +361,54 @@ final class ScannerViewModel: ObservableObject {
     scanVolumeXMM = summary.widthMM
     scanVolumeYMM = maximumObjectHeightMM
     scanVolumeZMM = summary.depthMM
-    status = "Ground area locked at \(summary.compactDescription). The app is now isolating the object above it."
-    objectIsolationMessage = "Searching for the largest non-ground surface cluster"
+    objectSelectionLocked = false
+    dimensionHistory.removeAll()
+    dimensionStabilityPercent = 0
+    status = "Ground area locked at \(summary.compactDescription). Aim the reticle at the object itself, then tap Select Object."
+    objectIsolationMessage = "Waiting for a tap-to-lock object selection"
     UINotificationFeedbackGenerator().notificationOccurred(.success)
+  }
 
-    // The fourth ground point completes the 2D region. Begin 3D capture immediately.
+  func selectObjectAtReticle() {
+    guard groundAreaReady, let arController else {
+      status = "Capture the four ground corners first."
+      return
+    }
+    guard reticleHasSurface else {
+      status = "Aim the reticle at a visible surface on the object and hold still."
+      UINotificationFeedbackGenerator().notificationOccurred(.warning)
+      return
+    }
+    guard arController.lockObjectSelectionFromScreenCenter() else {
+      status = "The selected point is outside the blue area or too close to the ground. Aim at the object itself and try again."
+      UINotificationFeedbackGenerator().notificationOccurred(.warning)
+      return
+    }
+
+    objectSelectionLocked = true
+    dimensionHistory.removeAll()
+    dimensionStabilityPercent = 0
+    objectIsolationMessage = "Object locked at the reticle; rejecting unrelated geometry"
+    status = "Object locked. Move slowly around it while the teal surface fills in."
+    UINotificationFeedbackGenerator().notificationOccurred(.success)
     startSurfaceScan()
+  }
+
+  func reselectObject() {
+    guard groundAreaReady else { return }
+    arController?.clearObjectSelectionAndCapturedGeometry()
+    objectSelectionLocked = false
+    isScanning = false
+    hasStartedSurfaceScan = false
+    dimensionHistory.removeAll()
+    dimensionStabilityPercent = 0
+    liveMeshDimensions = nil
+    capturedSurfaceTriangleCount = 0
+    capturedDepthPointCount = 0
+    capturedDepthTriangleCount = 0
+    detectedComponentCount = 0
+    objectIsolationMessage = "Waiting for a tap-to-lock object selection"
+    status = "Aim the reticle at the object and tap Select Object."
   }
 
   func startSurfaceScan() {
@@ -356,6 +418,10 @@ final class ScannerViewModel: ObservableObject {
     }
     guard groundAreaReady else {
       status = "Capture all four ground corners first."
+      return
+    }
+    guard objectSelectionLocked else {
+      status = "Aim at the object and tap Select Object before scanning."
       return
     }
     guard !isScanning, !isGeneratingSTL else { return }
@@ -381,7 +447,7 @@ final class ScannerViewModel: ObservableObject {
     objectIsolationMessage = "Scanning the selected footprint and removing the support surface"
     isGeneratingSTL = false
     arController.beginCapture(resetCoverage: true)
-    status = "Move slowly around the object. Teal geometry is the automatically isolated object surface."
+    status = "Move slowly around the selected object. Teal geometry is the locked subject surface."
     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
   }
 
@@ -460,6 +526,9 @@ final class ScannerViewModel: ObservableObject {
     objectCenterIsSet = false
     groundAreaReady = false
     groundAreaSummary = nil
+    objectSelectionLocked = false
+    dimensionHistory.removeAll()
+    dimensionStabilityPercent = 0
     referencePoints = []
     measurements = []
     toleranceResults = []
@@ -624,16 +693,67 @@ final class ScannerViewModel: ObservableObject {
     detectedComponentCount = max(componentCount, 0)
 
     let scale = scaleCorrectionFactor > 0 ? scaleCorrectionFactor : 1.0
-    let summary = STLDimensionSummary(
+    let candidate = STLDimensionSummary(
       widthMM: widthMM * scale,
       heightMM: heightMM * scale,
       depthMM: depthMM * scale,
       triangleCount: max(triangleCount, 0)
     )
-    liveMeshDimensions = summary.isUsable ? summary : nil
-    objectIsolationMessage = summary.isUsable
-      ? "Object isolated from \(max(componentCount, 1)) connected surface cluster(s)"
-      : "Searching for a stable non-ground object surface"
+    guard candidate.isUsable else {
+      liveMeshDimensions = nil
+      objectIsolationMessage = "Searching for a stable non-ground object surface"
+      return
+    }
+
+    // Reject one-frame explosions before they enter the rolling median. Real surface
+    // growth is gradual; a sudden 2–5× jump is almost always background or a depth ray.
+    if let previous = liveMeshDimensions, dimensionHistory.count >= 3 {
+      let spike = Self.isExplosiveGrowth(candidate.widthMM, previous.widthMM)
+        || Self.isExplosiveGrowth(candidate.heightMM, previous.heightMM)
+        || Self.isExplosiveGrowth(candidate.depthMM, previous.depthMM)
+      if spike {
+        objectIsolationMessage = "Object locked — rejected an unstable background expansion"
+        return
+      }
+    }
+
+    dimensionHistory.append(candidate)
+    if dimensionHistory.count > dimensionHistoryLimit {
+      dimensionHistory.removeFirst(dimensionHistory.count - dimensionHistoryLimit)
+    }
+
+    let stable = STLDimensionSummary(
+      widthMM: Self.median(dimensionHistory.map(\.widthMM)),
+      heightMM: Self.median(dimensionHistory.map(\.heightMM)),
+      depthMM: Self.median(dimensionHistory.map(\.depthMM)),
+      triangleCount: max(triangleCount, 0)
+    )
+    liveMeshDimensions = stable
+
+    let deviations = dimensionHistory.flatMap { sample in
+      [
+        abs(sample.widthMM - stable.widthMM) / max(stable.widthMM, 0.1),
+        abs(sample.heightMM - stable.heightMM) / max(stable.heightMM, 0.1),
+        abs(sample.depthMM - stable.depthMM) / max(stable.depthMM, 0.1),
+      ]
+    }
+    let meanDeviation = deviations.isEmpty ? 1 : deviations.reduce(0, +) / Double(deviations.count)
+    dimensionStabilityPercent = max(0, min(100, (1 - meanDeviation * 8) * 100))
+    objectIsolationMessage = "Object locked • robust bounds \(Int(dimensionStabilityPercent.rounded()))% stable"
+  }
+
+  private static func isExplosiveGrowth(_ candidate: Double, _ previous: Double) -> Bool {
+    candidate > previous * 1.55 + 6.0
+  }
+
+  private static func median(_ values: [Double]) -> Double {
+    guard !values.isEmpty else { return 0 }
+    let sorted = values.sorted()
+    let middle = sorted.count / 2
+    if sorted.count.isMultiple(of: 2) {
+      return (sorted[middle - 1] + sorted[middle]) / 2
+    }
+    return sorted[middle]
   }
 
   func clearLiveMeshDimensions() {
