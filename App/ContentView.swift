@@ -603,7 +603,7 @@ private struct BottomCircleButton: View {
       .frame(width: 62)
     }
     .buttonStyle(.plain)
-    .foregroundStyle(enabled ? .primary : .secondary.opacity(0.5))
+    .foregroundStyle(enabled ? Color.primary : Color.secondary.opacity(0.5))
     .disabled(!enabled)
   }
 }
