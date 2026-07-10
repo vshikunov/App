@@ -41,7 +41,7 @@ struct ContentView: View {
         .presentationDragIndicator(.visible)
     }
     .sheet(isPresented: $showHelp) {
-      BoundingBoxHelpView()
+      GroundAreaHelpView()
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
     }
@@ -114,14 +114,30 @@ struct ContentView: View {
 
             HStack(spacing: 7) {
               Text(model.trackingSummary)
-              if let summary = model.sixPointSummary {
+              if let summary = model.groundAreaSummary {
                 Text("•")
-                Text(summary.compactDescription)
+                Text("Area \(summary.compactDescription)")
               }
             }
             .font(.caption2)
             .foregroundStyle(.secondary)
             .lineLimit(1)
+
+            if model.groundAreaReady {
+              Label(model.objectIsolationMessage, systemImage: "viewfinder.circle")
+                .font(.caption2)
+                .foregroundStyle(.cyan)
+                .lineLimit(2)
+            }
+
+            if let meshDimensions = model.exportedSTLDimensions ?? model.liveMeshDimensions {
+              Label(
+                "Object \(meshDimensions.compactDescription)",
+                systemImage: "cube.fill"
+              )
+              .font(.caption2.monospacedDigit().weight(.semibold))
+              .foregroundStyle(.green)
+            }
           }
         }
 
@@ -132,7 +148,7 @@ struct ContentView: View {
       }
       .padding(.horizontal, 12)
       .padding(.vertical, 10)
-      .frame(maxWidth: 305, alignment: .leading)
+      .frame(maxWidth: 320, alignment: .leading)
       .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
       .overlay {
         RoundedRectangle(cornerRadius: 16, style: .continuous)
@@ -146,10 +162,10 @@ struct ContentView: View {
     Menu {
       Section("Display") {
         Toggle(isOn: $model.showCapturedSurface) {
-          Label("Captured object surface", systemImage: "square.3.layers.3d")
+          Label("Detected object surface", systemImage: "square.3.layers.3d")
         }
         Toggle(isOn: $model.showBoundingBox) {
-          Label("Bounding box", systemImage: "cube.transparent")
+          Label("Ground area and object bounds", systemImage: "viewfinder")
         }
         Toggle(isOn: $model.showMeshOverlay) {
           Label("Full-room debug mesh", systemImage: "point.3.filled.connected.trianglepath.dotted")
@@ -170,7 +186,7 @@ struct ContentView: View {
         Button {
           showHelp = true
         } label: {
-          Label("How the six points work", systemImage: "questionmark.circle")
+          Label("How the four ground points work", systemImage: "questionmark.circle")
         }
       }
 
@@ -186,7 +202,7 @@ struct ContentView: View {
         Button {
           model.clearReferencePoints()
         } label: {
-          Label("Clear bounding box", systemImage: "trash")
+          Label("Clear ground area", systemImage: "trash")
         }
         .disabled(model.referencePoints.isEmpty)
 
@@ -212,22 +228,22 @@ struct ContentView: View {
   @ViewBuilder
   private var phaseControls: some View {
     switch model.workflowPhase {
-    case .definingBox:
-      definingBoxControls
+    case .definingArea:
+      definingAreaControls
     case .readyToScan:
       readyToScanControls
     case .scanning:
       scanningControls
-    case .finalizing:
-      finalizingControls
     case .review:
       reviewControls
+    case .processing:
+      processingControls
     case .exported:
       exportedControls
     }
   }
 
-  private var definingBoxControls: some View {
+  private var definingAreaControls: some View {
     VStack(spacing: 10) {
       VStack(spacing: 5) {
         Text(model.nextReferencePointLabel)
@@ -255,13 +271,13 @@ struct ContentView: View {
           ZStack {
             Circle()
               .fill(model.reticleHasSurface ? Color.white : Color.secondary.opacity(0.55))
-              .frame(width: 72, height: 72)
+              .frame(width: 70, height: 70)
               .shadow(color: .black.opacity(0.24), radius: 8, y: 3)
             Circle()
               .stroke(.black.opacity(0.2), lineWidth: 1)
-              .frame(width: 62, height: 62)
+              .frame(width: 60, height: 60)
             Image(systemName: "plus")
-              .font(.system(size: 30, weight: .medium))
+              .font(.system(size: 29, weight: .medium))
               .foregroundStyle(model.reticleHasSurface ? .black : .white.opacity(0.65))
           }
         }
@@ -291,11 +307,11 @@ struct ContentView: View {
   private var readyToScanControls: some View {
     HStack(spacing: 12) {
       VStack(alignment: .leading, spacing: 3) {
-        Label("Bounding box ready", systemImage: "checkmark.seal.fill")
+        Label("Ground area ready", systemImage: "checkmark.seal.fill")
           .font(.subheadline.weight(.semibold))
           .foregroundStyle(.green)
-        if let summary = model.sixPointSummary {
-          Text(summary.compactDescription)
+        if let summary = model.groundAreaSummary {
+          Text("\(summary.compactDescription) • \(summary.areaDescription)")
             .font(.caption.monospacedDigit())
             .foregroundStyle(.secondary)
         }
@@ -310,12 +326,12 @@ struct ContentView: View {
           .frame(width: 40, height: 40)
       }
       .buttonStyle(.bordered)
-      .accessibilityLabel("Edit bounding box")
+      .accessibilityLabel("Edit ground area")
 
       Button {
         model.startSurfaceScan()
       } label: {
-        Label("Start Scan", systemImage: "viewfinder")
+        Label("Scan Object", systemImage: "viewfinder")
           .fontWeight(.semibold)
       }
       .buttonStyle(.borderedProminent)
@@ -326,74 +342,69 @@ struct ContentView: View {
   }
 
   private var scanningControls: some View {
-    HStack(spacing: 13) {
-      SurfaceScanProgressRing(progress: model.scanCoveragePercent / 100)
-        .frame(width: 48, height: 48)
-
-      VStack(alignment: .leading, spacing: 2) {
-        Text("Scanning the selected box")
-          .font(.subheadline.weight(.semibold))
-        Text(
-          "\(Int(model.scanCoveragePercent.rounded()))% view coverage • \(model.capturedSurfaceTriangleCount.formatted()) triangles"
-        )
-        .font(.caption2.monospacedDigit())
-        .foregroundStyle(.secondary)
-        .lineLimit(1)
+    VStack(spacing: 9) {
+      if let dimensions = model.liveMeshDimensions {
+        STLDimensionPanel(title: "Detected object size", summary: dimensions, compact: true)
       }
 
-      Spacer(minLength: 4)
+      HStack(spacing: 12) {
+        SurfaceScanProgressRing(progress: model.scanCoveragePercent / 100)
+          .frame(width: 46, height: 46)
 
-      Button {
-        model.finishSurfaceScanAndBuildSTL()
-      } label: {
-        Label("Finish", systemImage: "checkmark.circle.fill")
-          .fontWeight(.semibold)
-      }
-      .buttonStyle(.borderedProminent)
-      .tint(.blue)
-      .disabled(model.capturedSurfaceTriangleCount == 0)
-    }
-    .padding(.horizontal, 14)
-    .padding(.vertical, 10)
-    .frame(maxWidth: 470)
-    .background(.ultraThinMaterial, in: Capsule())
-  }
-
-  private var finalizingControls: some View {
-    HStack(spacing: 13) {
-      ProgressView()
-        .controlSize(.large)
-
-      VStack(alignment: .leading, spacing: 2) {
-        Text("Building STL")
-          .font(.subheadline.weight(.semibold))
-        Text("Cropping the six-point area and calculating X, Y, and Z dimensions")
-          .font(.caption2)
+        VStack(alignment: .leading, spacing: 2) {
+          Text(model.liveMeshDimensions == nil ? "Finding object in the area" : "Object isolated — capture all sides")
+            .font(.subheadline.weight(.semibold))
+          Text(
+            "\(Int(model.scanCoveragePercent.rounded()))% views • \(model.capturedSurfaceTriangleCount.formatted()) triangles"
+          )
+          .font(.caption2.monospacedDigit())
           .foregroundStyle(.secondary)
-          .lineLimit(2)
-      }
+          .lineLimit(1)
+        }
 
-      Spacer(minLength: 0)
+        Spacer(minLength: 2)
+
+        Button {
+          model.stopSurfaceScan()
+        } label: {
+          Image(systemName: "pause.fill")
+            .frame(width: 34, height: 34)
+        }
+        .buttonStyle(.bordered)
+        .accessibilityLabel("Pause object scan")
+
+        Button {
+          model.finishSurfaceScanAndCreateSTL()
+        } label: {
+          Label("Finish & Measure", systemImage: "checkmark.circle.fill")
+            .fontWeight(.semibold)
+        }
+        .buttonStyle(.borderedProminent)
+        .disabled(model.capturedSurfaceTriangleCount == 0)
+      }
     }
-    .padding(.horizontal, 14)
-    .padding(.vertical, 11)
-    .frame(maxWidth: 470)
-    .background(.ultraThinMaterial, in: Capsule())
+    .padding(11)
+    .frame(maxWidth: 480)
+    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
   }
 
   private var reviewControls: some View {
     VStack(spacing: 9) {
-      HStack {
-        VStack(alignment: .leading, spacing: 2) {
-          Text("Surface preview")
-            .font(.subheadline.weight(.semibold))
-          Text(
-            "\(model.capturedSurfaceTriangleCount.formatted()) captured triangles • \(Int(model.scanCoveragePercent.rounded()))% coverage"
-          )
-          .font(.caption2.monospacedDigit())
-          .foregroundStyle(.secondary)
+      if let dimensions = model.liveMeshDimensions {
+        STLDimensionPanel(title: "Detected object bounds", summary: dimensions, compact: true)
+      } else {
+        HStack {
+          VStack(alignment: .leading, spacing: 2) {
+            Text("Object surface preview")
+              .font(.subheadline.weight(.semibold))
+            Text(
+              "\(model.capturedSurfaceTriangleCount.formatted()) triangles • \(Int(model.scanCoveragePercent.rounded()))% views"
+            )
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(.secondary)
+          }
+          Spacer()
         }
-        Spacer()
       }
 
       HStack(spacing: 10) {
@@ -406,9 +417,9 @@ struct ContentView: View {
         .buttonStyle(.bordered)
 
         Button {
-          model.finishSurfaceScanAndBuildSTL()
+          model.finishSurfaceScanAndCreateSTL()
         } label: {
-          Label("Finish & Measure", systemImage: "ruler")
+          Label("Create STL & Measure", systemImage: "cube.fill")
             .frame(maxWidth: .infinity)
         }
         .buttonStyle(.borderedProminent)
@@ -416,8 +427,30 @@ struct ContentView: View {
       }
     }
     .padding(12)
-    .frame(maxWidth: 430)
+    .frame(maxWidth: 440)
     .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+  }
+
+  private var processingControls: some View {
+    HStack(spacing: 12) {
+      ProgressView()
+        .controlSize(.large)
+
+      VStack(alignment: .leading, spacing: 2) {
+        Text("Identifying object and building STL")
+          .font(.subheadline.weight(.semibold))
+        Text("Removing the ground, selecting the connected object surface, and measuring the mesh…")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .lineLimit(2)
+      }
+
+      Spacer()
+    }
+    .padding(.horizontal, 15)
+    .padding(.vertical, 12)
+    .frame(maxWidth: 450)
+    .background(.ultraThinMaterial, in: Capsule())
   }
 
   private var exportedControls: some View {
@@ -426,17 +459,17 @@ struct ContentView: View {
         Image(systemName: "checkmark.circle.fill")
           .foregroundStyle(.green)
         VStack(alignment: .leading, spacing: 2) {
-          Text("STL complete")
+          Text("Object STL complete")
             .font(.subheadline.weight(.semibold))
-          Text("\(model.lastTriangleCount.formatted()) triangles • exact six-point crop")
+          Text("\(model.lastTriangleCount.formatted()) triangles • \(model.lastVertexCount.formatted()) vertices")
             .font(.caption)
             .foregroundStyle(.secondary)
         }
         Spacer()
       }
 
-      if let dimensions = model.stlDimensionSummary {
-        STLDimensionCard(summary: dimensions)
+      if let dimensions = model.exportedSTLDimensions {
+        STLDimensionPanel(title: "Dimensional display from STL data", summary: dimensions, compact: false)
       }
 
       if !model.toleranceResults.isEmpty {
@@ -457,7 +490,7 @@ struct ContentView: View {
             Label("Dims", systemImage: "ruler")
               .frame(maxWidth: .infinity)
           }
-          .buttonStyle(.bordered)
+          .buttonStyle(.borderedProminent)
         }
 
         if let reportURL = model.lastReportURL {
@@ -467,46 +500,38 @@ struct ContentView: View {
           }
           .buttonStyle(.bordered)
         }
-      }
-
-      HStack(spacing: 18) {
-        Button {
-          model.resumeSurfaceScan()
-        } label: {
-          Label("Scan More", systemImage: "record.circle")
-        }
 
         Button {
           model.resetScan()
         } label: {
-          Label("New Scan", systemImage: "plus.circle")
+          Label("New", systemImage: "plus")
         }
+        .buttonStyle(.bordered)
       }
-      .font(.subheadline.weight(.semibold))
     }
     .padding(12)
-    .frame(maxWidth: 430)
+    .frame(maxWidth: 450)
     .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
   }
 
   private var statusIcon: String {
     switch model.workflowPhase {
-    case .definingBox: return "plus.viewfinder"
-    case .readyToScan: return "cube.transparent"
+    case .definingArea: return "square.dashed"
+    case .readyToScan: return "viewfinder"
     case .scanning: return "wave.3.right.circle.fill"
-    case .finalizing: return "gearshape.2.fill"
     case .review: return "eye.circle.fill"
+    case .processing: return "gearshape.2.fill"
     case .exported: return "checkmark.circle.fill"
     }
   }
 
   private var statusColor: Color {
     switch model.workflowPhase {
-    case .definingBox: return model.reticleHasSurface ? .cyan : .orange
+    case .definingArea: return model.reticleHasSurface ? .cyan : .orange
     case .readyToScan: return .green
     case .scanning: return .cyan
-    case .finalizing: return .blue
     case .review: return .blue
+    case .processing: return .orange
     case .exported: return .green
     }
   }
@@ -533,15 +558,16 @@ private struct MeasurementReticle: View {
 
         Rectangle()
           .fill(tint)
-          .frame(width: 18, height: 2)
+          .frame(width: 18, height: 1.5)
         Rectangle()
           .fill(tint)
-          .frame(width: 2, height: 18)
+          .frame(width: 1.5, height: 18)
+
         Circle()
           .fill(tint)
-          .frame(width: 6, height: 6)
+          .frame(width: 5, height: 5)
       }
-      .shadow(color: .black.opacity(0.45), radius: 2)
+      .shadow(color: .black.opacity(0.5), radius: 2)
 
       if let distanceMM, !isScanning {
         Text(distanceText(distanceMM))
@@ -566,18 +592,18 @@ private struct ReferenceProgressDots: View {
   let capturedCount: Int
 
   var body: some View {
-    HStack(spacing: 6) {
-      ForEach(0..<6, id: \.self) { index in
+    HStack(spacing: 8) {
+      ForEach(0..<4, id: \.self) { index in
         Circle()
           .fill(dotColor(index))
-          .frame(width: index == capturedCount ? 7 : 5, height: index == capturedCount ? 7 : 5)
+          .frame(width: index == capturedCount ? 8 : 6, height: index == capturedCount ? 8 : 6)
           .overlay {
             Circle()
               .stroke(.white.opacity(index < capturedCount ? 0.7 : 0.3), lineWidth: 1)
           }
       }
     }
-    .accessibilityLabel("\(capturedCount) of 6 bounding box points captured")
+    .accessibilityLabel("\(capturedCount) of 4 ground points captured")
   }
 
   private func dotColor(_ index: Int) -> Color {
@@ -585,10 +611,10 @@ private struct ReferenceProgressDots: View {
       return index == capturedCount ? .white.opacity(0.75) : .secondary.opacity(0.35)
     }
     switch index {
-    case 0: return .blue
-    case 1: return .orange
-    case 2, 3: return .purple
-    default: return .green
+    case 0: return .cyan
+    case 1: return .blue
+    case 2: return .indigo
+    default: return .purple
     }
   }
 }
@@ -607,6 +633,51 @@ private struct SurfaceScanProgressRing: View {
       Text("\(Int((progress * 100).rounded()))")
         .font(.caption2.monospacedDigit().bold())
     }
+  }
+}
+
+private struct STLDimensionPanel: View {
+  let title: String
+  let summary: STLDimensionSummary
+  let compact: Bool
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: compact ? 5 : 8) {
+      HStack(spacing: 7) {
+        Label(title, systemImage: "cube.fill")
+          .font((compact ? Font.caption : Font.subheadline).weight(.semibold))
+          .foregroundStyle(.cyan)
+        Spacer()
+        Text("\(summary.triangleCount.formatted()) tris")
+          .font(.caption2.monospacedDigit())
+          .foregroundStyle(.secondary)
+      }
+
+      HStack(spacing: compact ? 7 : 10) {
+        axisValue("W / X", value: summary.widthMM, color: .purple)
+        axisValue("H / Y", value: summary.heightMM, color: .orange)
+        axisValue("D / Z", value: summary.depthMM, color: .green)
+      }
+    }
+    .padding(.horizontal, compact ? 9 : 11)
+    .padding(.vertical, compact ? 7 : 9)
+    .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+  }
+
+  private func axisValue(_ axis: String, value: Double, color: Color) -> some View {
+    VStack(spacing: 2) {
+      Text(axis)
+        .font(.caption2.bold())
+        .foregroundStyle(color)
+      HStack(spacing: 3) {
+        Text(value, format: .number.precision(.fractionLength(1)))
+          .font(.caption.monospacedDigit().weight(.semibold))
+        Text("mm")
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+      }
+    }
+    .frame(maxWidth: .infinity)
   }
 }
 
@@ -655,37 +726,37 @@ private struct BottomCircleButton: View {
   }
 }
 
-private struct BoundingBoxHelpStep: Identifiable {
+private struct GroundAreaHelpStep: Identifiable {
   let id: Int
   let title: String
   let detail: String
   let color: Color
 }
 
-private struct BoundingBoxHelpView: View {
+private struct GroundAreaHelpView: View {
   @Environment(\.dismiss) private var dismiss
 
   private let steps = [
-    BoundingBoxHelpStep(
-      id: 1, title: "Bottom face",
-      detail:
-        "Aim near the center of the lowest face or the support plane at the bottom of the part.",
+    GroundAreaHelpStep(
+      id: 1,
+      title: "First ground corner",
+      detail: "Aim at the flat support surface just outside one corner of the object.",
+      color: .cyan),
+    GroundAreaHelpStep(
+      id: 2,
+      title: "Second corner",
+      detail: "Move clockwise around the object and capture the next ground corner.",
       color: .blue),
-    BoundingBoxHelpStep(
-      id: 2, title: "Top face",
-      detail: "Aim at the highest opposite face. This pair defines height and the local up axis.",
-      color: .orange),
-    BoundingBoxHelpStep(
-      id: 3, title: "Left face", detail: "Aim at the left-most side of the object.", color: .purple),
-    BoundingBoxHelpStep(
-      id: 4, title: "Right face",
-      detail: "Aim at the opposite right side. This pair defines width.", color: .purple),
-    BoundingBoxHelpStep(
-      id: 5, title: "Front face", detail: "Aim at the face nearest the chosen front of the part.",
-      color: .green),
-    BoundingBoxHelpStep(
-      id: 6, title: "Back face", detail: "Aim at the opposite rear face. This pair defines depth.",
-      color: .green),
+    GroundAreaHelpStep(
+      id: 3,
+      title: "Third corner",
+      detail: "Continue clockwise. Keep every point on the same table or floor plane.",
+      color: .indigo),
+    GroundAreaHelpStep(
+      id: 4,
+      title: "Final corner",
+      detail: "Close the 2D footprint around the object. 3D scanning starts immediately.",
+      color: .purple),
   ]
 
   var body: some View {
@@ -693,7 +764,7 @@ private struct BoundingBoxHelpView: View {
       ScrollView {
         VStack(alignment: .leading, spacing: 16) {
           Text(
-            "The six points are the centers of six opposite faces—not six arbitrary corners. The app builds an oriented 3D box from the three face pairs."
+            "The four points define only the ground area. ARKit then scans upward inside that footprint, removes the table/floor, and selects the largest connected 3D surface cluster as the object."
           )
           .font(.subheadline)
           .foregroundStyle(.secondary)
@@ -717,71 +788,29 @@ private struct BoundingBoxHelpView: View {
           }
 
           Label(
-            "After point 6, scanning starts automatically inside the blue box. Move around the part, then tap Finish to create the STL and display its measured X, Y, and Z dimensions.",
+            "After corner 4, move around all sides. The blue shape is the selected ground area, the teal mesh is the detected object, and the green box is its live measured extent.",
             systemImage: "sparkles"
           )
           .font(.subheadline)
           .padding(12)
           .background(.cyan.opacity(0.12), in: RoundedRectangle(cornerRadius: 14))
+
+          Label(
+            "Only one object should sit inside the selected area. Nearby objects or a footprint that is too large can be merged into the scan.",
+            systemImage: "exclamationmark.triangle"
+          )
+          .font(.footnote)
+          .foregroundStyle(.secondary)
         }
         .padding()
       }
-      .navigationTitle("Six-Face Bounding Box")
+      .navigationTitle("Four-Point Ground Area")
       .toolbar {
         ToolbarItem(placement: .confirmationAction) {
           Button("Done") { dismiss() }
         }
       }
     }
-  }
-}
-
-private struct STLDimensionCard: View {
-  let summary: STLDimensionSummary
-
-  var body: some View {
-    VStack(alignment: .leading, spacing: 8) {
-      HStack {
-        Label("STL dimensions", systemImage: "ruler")
-          .font(.caption.weight(.semibold))
-        Spacer()
-        Text("mm")
-          .font(.caption2)
-          .foregroundStyle(.secondary)
-      }
-
-      HStack(spacing: 8) {
-        dimensionCell(label: "W / X", value: summary.widthMM, tint: .purple)
-        dimensionCell(label: "H / Y", value: summary.heightMM, tint: .orange)
-        dimensionCell(label: "D / Z", value: summary.depthMM, tint: .green)
-      }
-
-      if let delta = summary.deltaDescription {
-        Text(delta)
-          .font(.caption2.monospacedDigit())
-          .foregroundStyle(.secondary)
-          .lineLimit(1)
-      }
-
-      Text("\(summary.vertexCount.formatted()) vertices • \(summary.triangleCount.formatted()) triangles")
-        .font(.caption2.monospacedDigit())
-        .foregroundStyle(.secondary)
-    }
-    .padding(10)
-    .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-  }
-
-  private func dimensionCell(label: String, value: Double, tint: Color) -> some View {
-    VStack(spacing: 2) {
-      Text(label)
-        .font(.caption2.bold())
-        .foregroundStyle(tint)
-      Text(value, format: .number.precision(.fractionLength(1)))
-        .font(.subheadline.monospacedDigit().weight(.semibold))
-    }
-    .frame(maxWidth: .infinity)
-    .padding(.vertical, 7)
-    .background(tint.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
   }
 }
 

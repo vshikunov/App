@@ -13,14 +13,22 @@ struct CapturedReferencePoint: Identifiable, Equatable {
   }
 }
 
-struct SixPointReferenceSummary: Equatable {
+struct GroundAreaSummary: Equatable {
   let widthMM: Double
-  let heightMM: Double
   let depthMM: Double
+  let areaMM2: Double
+  let planeTiltDegrees: Double
   let paddingMM: Double
 
   var compactDescription: String {
-    String(format: "%.1f × %.1f × %.1f mm", widthMM, heightMM, depthMM)
+    String(format: "%.1f × %.1f mm", widthMM, depthMM)
+  }
+
+  var areaDescription: String {
+    if areaMM2 >= 1_000_000 {
+      return String(format: "%.3f m²", areaMM2 / 1_000_000)
+    }
+    return String(format: "%.0f mm²", areaMM2)
   }
 }
 
@@ -28,56 +36,51 @@ struct STLDimensionSummary: Equatable {
   let widthMM: Double
   let heightMM: Double
   let depthMM: Double
-  let referenceWidthMM: Double?
-  let referenceHeightMM: Double?
-  let referenceDepthMM: Double?
-  let vertexCount: Int
   let triangleCount: Int
 
   var compactDescription: String {
-    String(format: "STL %.1f × %.1f × %.1f mm", widthMM, heightMM, depthMM)
+    String(format: "%.1f × %.1f × %.1f mm", widthMM, heightMM, depthMM)
   }
 
-  var deltaDescription: String? {
-    guard let referenceWidthMM, let referenceHeightMM, let referenceDepthMM else {
-      return nil
-    }
-    return String(
-      format: "Δ box  W %+.1f  H %+.1f  D %+.1f mm",
-      widthMM - referenceWidthMM,
-      heightMM - referenceHeightMM,
-      depthMM - referenceDepthMM
-    )
+  var isUsable: Bool {
+    widthMM.isFinite && heightMM.isFinite && depthMM.isFinite
+      && widthMM > 0 && heightMM > 0 && depthMM > 0
   }
 }
 
 enum ScannerWorkflowPhase: Equatable {
-  case definingBox
+  case definingArea
   case readyToScan
   case scanning
-  case finalizing
   case review
+  case processing
   case exported
 }
 
 @MainActor
 final class ScannerViewModel: ObservableObject {
-  @Published var status: String = "Aim at the bottom face and tap Add."
+  @Published var status: String = "Capture four ground corners clockwise around the object."
   @Published var trackingSummary: String = "Starting AR…"
   @Published var isScanning: Bool = false
   @Published var hasStartedSurfaceScan: Bool = false
   @Published var objectCenterIsSet: Bool = false
 
-  // Manual fallback crop values. The 6-face box overrides these during normal use.
-  @Published var scanVolumeXMM: Double = 160.0
-  @Published var scanVolumeYMM: Double = 160.0
-  @Published var scanVolumeZMM: Double = 160.0
+  // Manual fallback crop values. The 4-point ground area overrides X and Z.
+  @Published var scanVolumeXMM: Double = 200.0
+  @Published var scanVolumeYMM: Double = 600.0
+  @Published var scanVolumeZMM: Double = 200.0
+
+  // Automatic area/object isolation settings.
+  @Published var footprintMarginMM: Double = 3.0
+  @Published var maximumObjectHeightMM: Double = 600.0
+  @Published var groundClearanceMM: Double = 3.0
+  @Published var minimumObjectHeightMM: Double = 8.0
+  @Published var objectMergeDistanceMM: Double = 18.0
 
   // Display options.
   @Published var showMeshOverlay: Bool = false
   @Published var showCapturedSurface: Bool = true
   @Published var showBoundingBox: Bool = true
-  @Published var boundingBoxMarginMM: Double = 2.0
 
   @Published var scaleCorrectionFactor: Double = 1.0
   @Published var specs: [ToleranceSpec] = ToleranceSpec.defaultObjectSpecs
@@ -85,63 +88,62 @@ final class ScannerViewModel: ObservableObject {
   @Published var toleranceResults: [ToleranceResult] = []
   @Published var lastSTLURL: URL?
   @Published var lastReportURL: URL?
+  @Published var lastMeasurementsURL: URL?
   @Published var lastTriangleCount: Int = 0
   @Published var lastVertexCount: Int = 0
-  @Published var lastMeasurementsURL: URL?
-  @Published var stlDimensionSummary: STLDimensionSummary?
-  @Published var isFinalizing: Bool = false
 
-  // Six-face bounding box state.
+  // Four-point ground footprint state.
   @Published var referencePoints: [CapturedReferencePoint] = []
-  @Published var sixPointReferenceReady: Bool = false
-  @Published var sixPointSummary: SixPointReferenceSummary?
+  @Published var groundAreaReady: Bool = false
+  @Published var groundAreaSummary: GroundAreaSummary?
 
-  // Live Measure-style feedback.
+  // Live Measure-style feedback and automatic object isolation state.
   @Published var reticleHasSurface: Bool = false
   @Published var reticleDistanceMM: Double?
   @Published var scanCoveragePercent: Double = 0
   @Published var capturedSurfaceTriangleCount: Int = 0
+  @Published var liveMeshDimensions: STLDimensionSummary?
+  @Published var exportedSTLDimensions: STLDimensionSummary?
+  @Published var isGeneratingSTL: Bool = false
+  @Published var detectedComponentCount: Int = 0
+  @Published var objectIsolationMessage: String = "Waiting for the four-point area"
 
   weak var arController: ARScannerController?
 
   private let referencePointLabels = [
-    "Bottom face",
-    "Top face",
-    "Left face",
-    "Right face",
-    "Front face",
-    "Back face",
+    "Ground corner 1",
+    "Ground corner 2",
+    "Ground corner 3",
+    "Ground corner 4",
   ]
 
   private let referencePointInstructions = [
-    "Aim at the center of the bottom face or support plane.",
-    "Aim at the center of the top face.",
-    "Aim at the left-most face of the part.",
-    "Aim at the right-most face of the part.",
-    "Aim at the front face of the part.",
-    "Aim at the back face of the part.",
+    "Aim at the ground just outside the object, then tap Add.",
+    "Move clockwise to the next ground corner.",
+    "Continue clockwise around the object footprint.",
+    "Capture the final corner. Scanning starts automatically.",
   ]
 
   var workflowPhase: ScannerWorkflowPhase {
-    if isFinalizing { return .finalizing }
+    if isGeneratingSTL { return .processing }
     if lastSTLURL != nil { return .exported }
     if isScanning { return .scanning }
-    if sixPointReferenceReady {
+    if groundAreaReady {
       return hasStartedSurfaceScan ? .review : .readyToScan
     }
-    return .definingBox
+    return .definingArea
   }
 
   var nextReferencePointLabel: String {
     guard referencePoints.count < referencePointLabels.count else {
-      return "Bounding box complete"
+      return "Ground area complete"
     }
     return referencePointLabels[referencePoints.count]
   }
 
   var nextReferencePointInstruction: String {
     guard referencePoints.count < referencePointInstructions.count else {
-      return "The blue box now limits the object surface capture."
+      return "The blue footprint now limits automatic object detection."
     }
     return referencePointInstructions[referencePoints.count]
   }
@@ -156,18 +158,21 @@ final class ScannerViewModel: ObservableObject {
 
   var compactStatusTitle: String {
     switch workflowPhase {
-    case .definingBox:
+    case .definingArea:
       return "\(nextReferencePointLabel) • \(referenceProgressText)"
     case .readyToScan:
-      return "Box ready • Start surface scan"
+      return "Ground area ready • Start scan"
     case .scanning:
-      return "Capturing selected area • \(Int(scanCoveragePercent.rounded()))%"
-    case .finalizing:
-      return "Building STL and measuring…"
+      if let liveMeshDimensions {
+        return "Object detected • \(liveMeshDimensions.compactDescription)"
+      }
+      return "Finding object • \(Int(scanCoveragePercent.rounded()))%"
     case .review:
-      return "Surface captured • Finish and measure"
+      return "Object surface captured • Review or measure"
+    case .processing:
+      return "Isolating object and building STL…"
     case .exported:
-      return stlDimensionSummary?.compactDescription ?? "STL and report are ready"
+      return "STL and object dimensions are ready"
     }
   }
 
@@ -175,7 +180,7 @@ final class ScannerViewModel: ObservableObject {
     arController = controller
   }
 
-  /// Manual fallback for unusual objects. The six-face box is the normal workflow.
+  /// Manual fallback for unusual objects. Four ground points are the normal workflow.
   func setObjectCenter() {
     guard let arController else {
       status = "AR view is not ready yet."
@@ -184,8 +189,8 @@ final class ScannerViewModel: ObservableObject {
     clearReferencePointsWithoutResettingAR()
     arController.setObjectCenterFromScreenCenter()
     objectCenterIsSet = true
-    sixPointReferenceReady = false
-    sixPointSummary = nil
+    groundAreaReady = false
+    groundAreaSummary = nil
   }
 
   func captureReferencePoint() {
@@ -194,16 +199,16 @@ final class ScannerViewModel: ObservableObject {
       return
     }
     guard canCaptureMoreReferencePoints else {
-      status = "The six box faces are already captured. Undo or clear to edit them."
+      status = "The four ground corners are already captured. Undo or clear to edit them."
       return
     }
     guard reticleHasSurface else {
-      status = "No stable surface at the reticle. Move more slowly and aim at a visible face."
+      status = "No stable surface at the reticle. Hold still and aim at the ground."
       UINotificationFeedbackGenerator().notificationOccurred(.warning)
       return
     }
     guard let point = arController.captureWorldPointFromScreenCenter() else {
-      status = "Could not capture a 3D point. Hold steady and try again."
+      status = "Could not capture a 3D ground point. Hold steady and try again."
       UINotificationFeedbackGenerator().notificationOccurred(.warning)
       return
     }
@@ -219,25 +224,30 @@ final class ScannerViewModel: ObservableObject {
     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
 
     if referencePoints.count == referencePointLabels.count {
-      applySixPointReference()
+      applyGroundAreaReference()
     } else {
-      status = "Captured \(captured.label). Next: \(nextReferencePointLabel)."
+      status = "Captured corner \(index + 1). Continue clockwise to corner \(index + 2)."
     }
   }
 
   func undoReferencePoint() {
     guard !referencePoints.isEmpty else {
-      status = "No reference point to undo."
+      status = "No ground point to undo."
       return
     }
 
     let removed = referencePoints.removeLast()
     objectCenterIsSet = false
     hasStartedSurfaceScan = false
-    sixPointReferenceReady = false
-    sixPointSummary = nil
+    groundAreaReady = false
+    groundAreaSummary = nil
     capturedSurfaceTriangleCount = 0
     scanCoveragePercent = 0
+    liveMeshDimensions = nil
+    exportedSTLDimensions = nil
+    isGeneratingSTL = false
+    detectedComponentCount = 0
+    objectIsolationMessage = "Waiting for the four-point area"
     arController?.removeLastReferencePointMarker()
     arController?.invalidateBoundingBox()
     status = "Removed \(removed.label). Aim at \(nextReferencePointLabel)."
@@ -246,7 +256,7 @@ final class ScannerViewModel: ObservableObject {
 
   func clearReferencePoints() {
     clearReferencePointsWithoutResettingAR()
-    status = "Box cleared. Aim at the bottom face and tap Add."
+    status = "Area cleared. Capture four ground corners clockwise around the object."
   }
 
   private func clearReferencePointsWithoutResettingAR() {
@@ -254,48 +264,56 @@ final class ScannerViewModel: ObservableObject {
     hasStartedSurfaceScan = false
     referencePoints = []
     objectCenterIsSet = false
-    sixPointReferenceReady = false
-    sixPointSummary = nil
+    groundAreaReady = false
+    groundAreaSummary = nil
     scanCoveragePercent = 0
     capturedSurfaceTriangleCount = 0
+    liveMeshDimensions = nil
+    exportedSTLDimensions = nil
+    isGeneratingSTL = false
+    detectedComponentCount = 0
+    objectIsolationMessage = "Waiting for the four-point area"
     measurements = []
     toleranceResults = []
     lastSTLURL = nil
     lastReportURL = nil
     lastMeasurementsURL = nil
-    stlDimensionSummary = nil
-    isFinalizing = false
     arController?.clearReferenceVisuals()
   }
 
-  private func applySixPointReference() {
+  private func applyGroundAreaReference() {
     guard let arController else { return }
     let points = referencePoints.map(\.world)
 
     guard
-      let summary = arController.applySixPointReference(
+      let summary = arController.applyFourPointGroundArea(
         points: points,
-        paddingMM: boundingBoxMarginMM
+        paddingMM: footprintMarginMM,
+        maximumHeightMM: maximumObjectHeightMM,
+        groundClearanceMM: groundClearanceMM,
+        minimumObjectHeightMM: minimumObjectHeightMM,
+        mergeDistanceMM: objectMergeDistanceMM
       )
     else {
       objectCenterIsSet = false
-      sixPointReferenceReady = false
-      sixPointSummary = nil
-      status = "Those points do not form a usable box. Check each opposite face and try again."
+      groundAreaReady = false
+      groundAreaSummary = nil
+      status = "Those points do not form a usable flat area. Capture four corners clockwise on one surface."
       UINotificationFeedbackGenerator().notificationOccurred(.error)
       return
     }
 
-    sixPointSummary = summary
-    sixPointReferenceReady = true
+    groundAreaSummary = summary
+    groundAreaReady = true
     objectCenterIsSet = true
     scanVolumeXMM = summary.widthMM
-    scanVolumeYMM = summary.heightMM
+    scanVolumeYMM = maximumObjectHeightMM
     scanVolumeZMM = summary.depthMM
-    status = "Bounding box locked at \(summary.compactDescription). Surface capture started automatically inside this box."
+    status = "Ground area locked at \(summary.compactDescription). The app is now isolating the object above it."
+    objectIsolationMessage = "Searching for the largest non-ground surface cluster"
     UINotificationFeedbackGenerator().notificationOccurred(.success)
 
-    // The six points are the complete scan boundary. Start collecting only the mesh inside it immediately.
+    // The fourth ground point completes the 2D region. Begin 3D capture immediately.
     startSurfaceScan()
   }
 
@@ -304,10 +322,11 @@ final class ScannerViewModel: ObservableObject {
       status = "AR view is not ready yet."
       return
     }
-    guard sixPointReferenceReady else {
-      status = "Capture all six box faces first."
+    guard groundAreaReady else {
+      status = "Capture all four ground corners first."
       return
     }
+    guard !isScanning, !isGeneratingSTL else { return }
 
     isScanning = true
     hasStartedSurfaceScan = true
@@ -316,14 +335,17 @@ final class ScannerViewModel: ObservableObject {
     lastSTLURL = nil
     lastReportURL = nil
     lastMeasurementsURL = nil
-    stlDimensionSummary = nil
-    isFinalizing = false
     lastTriangleCount = 0
     lastVertexCount = 0
     scanCoveragePercent = 0
     capturedSurfaceTriangleCount = 0
+    liveMeshDimensions = nil
+    exportedSTLDimensions = nil
+    detectedComponentCount = 0
+    objectIsolationMessage = "Scanning the selected footprint and removing the support surface"
+    isGeneratingSTL = false
     arController.beginCapture(resetCoverage: true)
-    status = "Scanning only inside the six-point box. Move around the part until the teal surface covers every visible side."
+    status = "Move slowly around the object. Teal geometry is the automatically isolated object surface."
     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
   }
 
@@ -331,47 +353,35 @@ final class ScannerViewModel: ObservableObject {
     guard isScanning else { return }
     arController?.endCapture()
     isScanning = false
-    status = "Scan paused. Inspect the teal surface, resume if needed, or export."
+    status = "Scan paused. Inspect the teal object surface, resume if needed, or finish and measure."
     UIImpactFeedbackGenerator(style: .light).impactOccurred()
   }
 
-  func finishSurfaceScanAndBuildSTL() {
-    guard sixPointReferenceReady else {
-      status = "Capture all six box faces first."
+  func finishSurfaceScanAndCreateSTL() {
+    guard groundAreaReady else {
+      status = "Capture the four ground corners before creating an STL."
       return
     }
-    guard !isFinalizing else { return }
 
     if isScanning {
       arController?.endCapture()
       isScanning = false
     }
 
-    isFinalizing = true
-    status = "Cropping the selected area, building the STL, and calculating dimensions…"
-    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+    isGeneratingSTL = true
+    status = "Identifying the object, generating its STL, and measuring X/Y/Z bounds…"
 
     Task { @MainActor [weak self] in
-      guard let self else { return }
       await Task.yield()
-      self.exportCurrentScan()
-      self.isFinalizing = false
+      self?.exportCurrentScan()
     }
   }
 
   func resumeSurfaceScan() {
-    guard sixPointReferenceReady else { return }
-    lastSTLURL = nil
-    lastReportURL = nil
-    lastMeasurementsURL = nil
-    stlDimensionSummary = nil
-    measurements = []
-    toleranceResults = []
-    lastTriangleCount = 0
-    lastVertexCount = 0
+    guard groundAreaReady else { return }
     isScanning = true
     arController?.beginCapture(resetCoverage: false)
-    status = "Surface capture resumed inside the same six-point box. Fill in missing sides and corners."
+    status = "Object capture resumed. Fill in missing sides and corners."
   }
 
   /// Compatibility for older UI actions.
@@ -383,7 +393,7 @@ final class ScannerViewModel: ObservableObject {
   func toggleScan() {
     if isScanning {
       stopSurfaceScan()
-    } else if sixPointReferenceReady {
+    } else if groundAreaReady {
       startSurfaceScan()
     } else {
       startManualScan()
@@ -392,7 +402,7 @@ final class ScannerViewModel: ObservableObject {
 
   private func startManualScan() {
     guard objectCenterIsSet else {
-      status = "Set a manual center or capture the six box faces first."
+      status = "Set a manual center or capture the four-point ground area first."
       return
     }
     isScanning = true
@@ -406,34 +416,42 @@ final class ScannerViewModel: ObservableObject {
     isScanning = false
     hasStartedSurfaceScan = false
     objectCenterIsSet = false
-    sixPointReferenceReady = false
-    sixPointSummary = nil
+    groundAreaReady = false
+    groundAreaSummary = nil
     referencePoints = []
     measurements = []
     toleranceResults = []
     lastSTLURL = nil
     lastReportURL = nil
     lastMeasurementsURL = nil
-    stlDimensionSummary = nil
-    isFinalizing = false
     lastTriangleCount = 0
     lastVertexCount = 0
     scanCoveragePercent = 0
     capturedSurfaceTriangleCount = 0
+    liveMeshDimensions = nil
+    exportedSTLDimensions = nil
+    isGeneratingSTL = false
+    detectedComponentCount = 0
+    objectIsolationMessage = "Waiting for the four-point area"
     reticleHasSurface = false
     reticleDistanceMM = nil
-    status = "New scan ready. Aim at the bottom face and tap Add."
+    status = "New scan ready. Capture four ground corners clockwise around the object."
   }
 
   func exportCurrentScan() {
     guard let arController else {
+      isGeneratingSTL = false
       status = "AR view is not ready yet."
       return
     }
     guard objectCenterIsSet else {
-      status = "Create the six-face bounding box before exporting."
+      isGeneratingSTL = false
+      status = "Create the four-point ground area before exporting."
       return
     }
+
+    isGeneratingSTL = true
+    defer { isGeneratingSTL = false }
 
     if isScanning {
       arController.endCapture()
@@ -442,19 +460,29 @@ final class ScannerViewModel: ObservableObject {
 
     do {
       guard
-        let rawMesh = arController.makeCroppedObjectMesh(
+        let rawMesh = arController.makeDetectedObjectMesh(
           volumeXMM: scanVolumeXMM,
-          volumeYMM: scanVolumeYMM,
+          maximumHeightMM: maximumObjectHeightMM,
           volumeZMM: scanVolumeZMM
         ), !rawMesh.isEmpty
       else {
-        status = "No object surface was found inside the box. Resume scanning or redefine the box."
+        status = "No isolated object surface was found. Resume scanning or redraw the ground area closer to the part."
         UINotificationFeedbackGenerator().notificationOccurred(.warning)
         return
       }
 
       let safeScale = scaleCorrectionFactor > 0 ? scaleCorrectionFactor : 1.0
       let mesh = rawMesh.scaled(by: safeScale)
+      let stlBounds = mesh.boundingBox()
+      let finalDimensions = stlBounds.map { box in
+        let groundReferencedHeight = groundAreaReady ? max(box.max.y, box.size.y) : box.size.y
+        return STLDimensionSummary(
+          widthMM: box.size.x,
+          heightMM: groundReferencedHeight,
+          depthMM: box.size.z,
+          triangleCount: mesh.validFaceCount()
+        )
+      }
 
       let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
       let folder = documents.appendingPathComponent("DimensionalScans", isDirectory: true)
@@ -462,27 +490,34 @@ final class ScannerViewModel: ObservableObject {
 
       let stamp = Self.safeTimestamp()
       let stlURL = folder.appendingPathComponent("scan_\(stamp).stl")
-      let reportURL = folder.appendingPathComponent("scan_report_\(stamp).csv")
-      let measurementURL = folder.appendingPathComponent("scan_measurements_\(stamp).csv")
+      let reportURL = folder.appendingPathComponent("scan_tolerances_\(stamp).csv")
+      let measurementURL = folder.appendingPathComponent("scan_dimensions_\(stamp).csv")
 
-      try STLExporter.writeASCII(mesh: mesh, name: "iPhone_scan_\(stamp)", to: stlURL)
+      try STLExporter.writeASCII(mesh: mesh, name: "iPhone_object_\(stamp)", to: stlURL)
 
       var newMeasurements = MeshMeasurementCalculator.measurements(for: mesh)
-      let calibratedReferenceWidthMM = sixPointSummary.map { $0.widthMM * safeScale }
-      let calibratedReferenceHeightMM = sixPointSummary.map { $0.heightMM * safeScale }
-      let calibratedReferenceDepthMM = sixPointSummary.map { $0.depthMM * safeScale }
-      if let calibratedReferenceWidthMM, let calibratedReferenceHeightMM,
-        let calibratedReferenceDepthMM
-      {
+      if groundAreaReady, let box = stlBounds {
+        let heightFromGround = max(box.max.y, box.size.y)
+        if let index = newMeasurements.firstIndex(where: { $0.name == "bbox_y_mm" }) {
+          newMeasurements[index].value = heightFromGround
+        }
         newMeasurements.append(
-          MeshMeasurement(name: "reference_width_mm", value: calibratedReferenceWidthMM, unit: "mm"))
+          MeshMeasurement(name: "height_from_ground_mm", value: heightFromGround, unit: "mm"))
+      }
+      if let summary = groundAreaSummary {
         newMeasurements.append(
-          MeshMeasurement(name: "reference_height_mm", value: calibratedReferenceHeightMM, unit: "mm"))
+          MeshMeasurement(name: "ground_area_width_mm", value: summary.widthMM, unit: "mm"))
         newMeasurements.append(
-          MeshMeasurement(name: "reference_depth_mm", value: calibratedReferenceDepthMM, unit: "mm"))
+          MeshMeasurement(name: "ground_area_depth_mm", value: summary.depthMM, unit: "mm"))
+        newMeasurements.append(
+          MeshMeasurement(name: "ground_area_mm2", value: summary.areaMM2, unit: "mm2"))
+        newMeasurements.append(
+          MeshMeasurement(name: "ground_plane_tilt_deg", value: summary.planeTiltDegrees, unit: "degree"))
       }
       newMeasurements.append(
         MeshMeasurement(name: "scan_coverage_percent", value: scanCoveragePercent, unit: "percent"))
+      newMeasurements.append(
+        MeshMeasurement(name: "detected_component_count", value: Double(detectedComponentCount), unit: "count"))
 
       let measurementMap = Dictionary(
         uniqueKeysWithValues: newMeasurements.map { ($0.name, $0.value) })
@@ -499,30 +534,49 @@ final class ScannerViewModel: ObservableObject {
       lastMeasurementsURL = measurementURL
       lastVertexCount = mesh.vertices.count
       lastTriangleCount = mesh.validFaceCount()
-
-      if let box = mesh.boundingBox() {
-        stlDimensionSummary = STLDimensionSummary(
-          widthMM: box.size.x,
-          heightMM: box.size.y,
-          depthMM: box.size.z,
-          referenceWidthMM: calibratedReferenceWidthMM,
-          referenceHeightMM: calibratedReferenceHeightMM,
-          referenceDepthMM: calibratedReferenceDepthMM,
-          vertexCount: mesh.vertices.count,
-          triangleCount: mesh.validFaceCount()
-        )
+      exportedSTLDimensions = finalDimensions
+      if let finalDimensions {
+        liveMeshDimensions = finalDimensions
+        status = "Object STL ready: \(finalDimensions.compactDescription), \(lastTriangleCount) triangles."
       } else {
-        stlDimensionSummary = nil
+        status = "Object STL ready: \(lastTriangleCount) triangles."
       }
-
-      status = stlDimensionSummary.map { "STL ready: \($0.compactDescription)." }
-        ?? "STL ready: \(lastTriangleCount) triangles."
+      objectIsolationMessage = "Largest connected object cluster exported"
       UINotificationFeedbackGenerator().notificationOccurred(.success)
     } catch {
-      stlDimensionSummary = nil
       status = "Export failed: \(error.localizedDescription)"
       UINotificationFeedbackGenerator().notificationOccurred(.error)
     }
+  }
+
+  func updateLiveMeshDimensions(
+    widthMM: Double,
+    heightMM: Double,
+    depthMM: Double,
+    triangleCount: Int,
+    componentCount: Int
+  ) {
+    capturedSurfaceTriangleCount = max(triangleCount, 0)
+    detectedComponentCount = max(componentCount, 0)
+
+    let scale = scaleCorrectionFactor > 0 ? scaleCorrectionFactor : 1.0
+    let summary = STLDimensionSummary(
+      widthMM: widthMM * scale,
+      heightMM: heightMM * scale,
+      depthMM: depthMM * scale,
+      triangleCount: max(triangleCount, 0)
+    )
+    liveMeshDimensions = summary.isUsable ? summary : nil
+    objectIsolationMessage = summary.isUsable
+      ? "Object isolated from \(max(componentCount, 1)) connected surface cluster(s)"
+      : "Searching for a stable non-ground object surface"
+  }
+
+  func clearLiveMeshDimensions() {
+    capturedSurfaceTriangleCount = 0
+    liveMeshDimensions = nil
+    detectedComponentCount = 0
+    objectIsolationMessage = "Searching for a stable non-ground object surface"
   }
 
   func applyDefaultBoxSpecs() {

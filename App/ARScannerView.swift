@@ -47,15 +47,99 @@ private struct SurfacePreviewData {
   let positions: [SIMD3<Float>]
   let indices: [UInt32]
   let triangleCount: Int
+  let dimensionsMM: SIMD3<Double>?
+  let componentCount: Int
+  let detectedCenterWorld: SIMD3<Float>?
+  let detectedHalfExtentsM: SIMD3<Float>?
 }
 
 private struct MeshCropContext {
-  let centerWorld: SIMD3<Float>
-  let halfExtentsM: SIMD3<Float>
+  /// Lower-left corner of the ground footprint in the selected local X/Y/Z coordinate system.
   let referenceOriginWorld: SIMD3<Float>
   let basisWorld: simd_float3x3
+  /// Convex 2D polygon in local X/Z coordinates relative to referenceOriginWorld.
+  let footprintPolygonXZ: [SIMD2<Float>]
+  let footprintWidthM: Float
+  let footprintDepthM: Float
+  let footprintPaddingM: Float
+  let maximumHeightM: Float
+  let groundClearanceM: Float
+  let minimumObjectHeightM: Float
+  let mergeDistanceM: Float
   let removeSupportSurface: Bool
-  let groundRemovalHeightM: Float
+}
+
+private struct CandidateTriangle {
+  let world0: SIMD3<Float>
+  let world1: SIMD3<Float>
+  let world2: SIMD3<Float>
+  let local0: SIMD3<Float>
+  let local1: SIMD3<Float>
+  let local2: SIMD3<Float>
+  let centroid: SIMD3<Float>
+  let areaM2: Float
+
+  var localMin: SIMD3<Float> {
+    simd_min(local0, simd_min(local1, local2))
+  }
+
+  var localMax: SIMD3<Float> {
+    simd_max(local0, simd_max(local1, local2))
+  }
+}
+
+private struct SpatialKey: Hashable {
+  let x: Int
+  let y: Int
+  let z: Int
+}
+
+private struct VertexLink {
+  let triangleIndex: Int
+  let point: SIMD3<Float>
+}
+
+private struct ComponentInfo {
+  let root: Int
+  let triangleIndices: [Int]
+  let surfaceAreaM2: Float
+  let minPoint: SIMD3<Float>
+  let maxPoint: SIMD3<Float>
+  let centroid: SIMD3<Float>
+
+  var heightM: Float { maxPoint.y - minPoint.y }
+  var triangleCount: Int { triangleIndices.count }
+}
+
+private struct UnionFind {
+  private var parent: [Int]
+  private var rank: [UInt8]
+
+  init(count: Int) {
+    parent = Array(0..<count)
+    rank = Array(repeating: 0, count: count)
+  }
+
+  mutating func find(_ value: Int) -> Int {
+    if parent[value] != value {
+      parent[value] = find(parent[value])
+    }
+    return parent[value]
+  }
+
+  mutating func union(_ a: Int, _ b: Int) {
+    var rootA = find(a)
+    var rootB = find(b)
+    guard rootA != rootB else { return }
+
+    if rank[rootA] < rank[rootB] {
+      swap(&rootA, &rootB)
+    }
+    parent[rootB] = rootA
+    if rank[rootA] == rank[rootB] {
+      rank[rootA] &+= 1
+    }
+  }
 }
 
 final class ARScannerController: NSObject, ARSessionDelegate {
@@ -68,30 +152,32 @@ final class ARScannerController: NSObject, ARSessionDelegate {
   private var meshAnchors: [UUID: ARMeshAnchor] = [:]
   private var captureActive = false
 
-  /// Center of the selected crop box in world space.
+  /// Center used for camera-coverage guidance.
   private var objectCenterWorld: SIMD3<Float>?
 
-  /// Lower-left-front corner of the exact six-face box. Export coordinates use this origin.
+  /// Ground datum and STL coordinate origin: lower-left corner of the selected footprint.
   private var objectReferenceOriginWorld: SIMD3<Float>?
 
-  /// Columns are local X/right, local Y/up, and local Z/depth axes in world coordinates.
+  /// Columns are local X/right, local Y/ground-normal, and local Z/depth axes in world coordinates.
   private var partBasisWorld = simd_float3x3(
     SIMD3<Float>(1, 0, 0),
     SIMD3<Float>(0, 1, 0),
     SIMD3<Float>(0, 0, 1)
   )
 
-  /// Padded half extents used to collect LiDAR triangles.
-  private var sixPointHalfExtentsM: SIMD3<Float>?
-
-  /// Exact half extents shown by the blue box.
-  private var exactBoxHalfExtentsM: SIMD3<Float>?
-
-  private let groundRemovalHeightM: Float = 0.003
+  private var groundFootprintPolygonXZ: [SIMD2<Float>] = []
+  private var groundFootprintWidthM: Float = 0
+  private var groundFootprintDepthM: Float = 0
+  private var footprintPaddingM: Float = 0.003
+  private var maximumObjectHeightM: Float = 0.6
+  private var groundClearanceM: Float = 0.003
+  private var minimumObjectHeightM: Float = 0.008
+  private var objectMergeDistanceM: Float = 0.018
 
   // RealityKit visual entities.
   private var referenceMarkerAnchors: [AnchorEntity] = []
   private var boundingBoxAnchor: AnchorEntity?
+  private var detectedBoundsAnchor: AnchorEntity?
   private var capturedSurfaceAnchor: AnchorEntity?
   private var capturedSurfaceEntity: ModelEntity?
   private var capturedSurfaceVisible = true
@@ -147,7 +233,7 @@ final class ARScannerController: NSObject, ARSessionDelegate {
     }
     arView?.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
     setMeshOverlayVisible(showMeshOverlay)
-    postStatus("Aim at the bottom face and tap Add.")
+    postStatus("Capture four ground corners clockwise around the object.")
   }
 
   @MainActor
@@ -179,6 +265,7 @@ final class ARScannerController: NSObject, ARSessionDelegate {
   func setBoundingBoxVisible(_ visible: Bool) {
     boundingBoxVisible = visible
     boundingBoxAnchor?.isEnabled = visible
+    detectedBoundsAnchor?.isEnabled = visible
     for marker in referenceMarkerAnchors {
       marker.isEnabled = visible
     }
@@ -193,10 +280,11 @@ final class ARScannerController: NSObject, ARSessionDelegate {
 
     objectCenterWorld = point
     objectReferenceOriginWorld = point
-    sixPointHalfExtentsM = nil
-    exactBoxHalfExtentsM = nil
+    groundFootprintPolygonXZ = []
+    groundFootprintWidthM = 0
+    groundFootprintDepthM = 0
     updatePartBasisFromCurrentCamera()
-    postStatus("Manual center set. The six-face box gives better isolation and scale feedback.")
+    postStatus("Manual center set. Four ground corners give better object isolation.")
   }
 
   @MainActor
@@ -221,18 +309,15 @@ final class ARScannerController: NSObject, ARSessionDelegate {
     guard let arView else { return }
 
     let colors: [UIColor] = [
+      .systemCyan,
       .systemBlue,
-      .systemOrange,
+      .systemIndigo,
       .systemPurple,
-      .systemPurple,
-      .systemGreen,
-      .systemGreen,
     ]
     let color = colors.indices.contains(index) ? colors[index] : .white
-    // Keep the six reference points precise without obscuring the surface.
     let sphere = ModelEntity(
-      mesh: .generateSphere(radius: 0.0028),
-      materials: [SimpleMaterial(color: color.withAlphaComponent(0.96), isMetallic: false)]
+      mesh: .generateSphere(radius: 0.0022),
+      materials: [SimpleMaterial(color: color, isMetallic: false)]
     )
     let anchor = AnchorEntity(world: point)
     anchor.addChild(sphere)
@@ -259,17 +344,22 @@ final class ARScannerController: NSObject, ARSessionDelegate {
     if let boundingBoxAnchor {
       arView.scene.removeAnchor(boundingBoxAnchor)
     }
+    if let detectedBoundsAnchor {
+      arView.scene.removeAnchor(detectedBoundsAnchor)
+    }
     if let capturedSurfaceAnchor {
       arView.scene.removeAnchor(capturedSurfaceAnchor)
     }
 
     boundingBoxAnchor = nil
+    detectedBoundsAnchor = nil
     capturedSurfaceAnchor = nil
     capturedSurfaceEntity = nil
     objectCenterWorld = nil
     objectReferenceOriginWorld = nil
-    sixPointHalfExtentsM = nil
-    exactBoxHalfExtentsM = nil
+    groundFootprintPolygonXZ = []
+    groundFootprintWidthM = 0
+    groundFootprintDepthM = 0
     coveredCameraSectors.removeAll()
 
     anchorQueue.sync {
@@ -284,102 +374,131 @@ final class ARScannerController: NSObject, ARSessionDelegate {
     if let boundingBoxAnchor {
       arView.scene.removeAnchor(boundingBoxAnchor)
     }
+    if let detectedBoundsAnchor {
+      arView.scene.removeAnchor(detectedBoundsAnchor)
+    }
     if let capturedSurfaceAnchor {
       arView.scene.removeAnchor(capturedSurfaceAnchor)
     }
     boundingBoxAnchor = nil
+    detectedBoundsAnchor = nil
     capturedSurfaceAnchor = nil
     capturedSurfaceEntity = nil
     objectCenterWorld = nil
     objectReferenceOriginWorld = nil
-    sixPointHalfExtentsM = nil
-    exactBoxHalfExtentsM = nil
+    groundFootprintPolygonXZ = []
+    groundFootprintWidthM = 0
+    groundFootprintDepthM = 0
     coveredCameraSectors.removeAll()
-    model?.capturedSurfaceTriangleCount = 0
+    model?.clearLiveMeshDimensions()
     model?.scanCoveragePercent = 0
   }
 
-  /// Compatibility alias used by the earlier six-point patch.
+  /// Compatibility alias used by previous patches.
   @MainActor
   func clearSixPointReference() {
     clearReferenceVisuals()
   }
 
-  /// Six captured points represent opposite faces: bottom/top, left/right, and front/back.
+  /// Four points define a convex footprint on one ground/support plane.
   @MainActor
-  func applySixPointReference(
+  func applyFourPointGroundArea(
     points: [SIMD3<Float>],
-    paddingMM: Double
-  ) -> SixPointReferenceSummary? {
-    guard points.count >= 6 else { return nil }
+    paddingMM: Double,
+    maximumHeightMM: Double,
+    groundClearanceMM: Double,
+    minimumObjectHeightMM: Double,
+    mergeDistanceMM: Double
+  ) -> GroundAreaSummary? {
+    guard points.count >= 4 else { return nil }
+    let input = Array(points.prefix(4))
+    let centroid = input.reduce(SIMD3<Float>(repeating: 0), +) / Float(input.count)
 
-    let bottom = points[0]
-    let top = points[1]
-    let left = points[2]
-    let right = points[3]
-    let front = points[4]
-    let back = points[5]
-
-    let rawUp = top - bottom
-    guard simd_length(rawUp) > 0.005 else { return nil }
-    let upAxis = simd_normalize(rawUp)
-
-    let rawRight = right - left
-    var xAxis = rawRight - upAxis * simd_dot(rawRight, upAxis)
-    guard simd_length(xAxis) > 0.005 else { return nil }
-    xAxis = simd_normalize(xAxis)
-
-    let rawDepth = back - front
-    var depthProjected =
-      rawDepth
-      - upAxis * simd_dot(rawDepth, upAxis)
-      - xAxis * simd_dot(rawDepth, xAxis)
-
-    if simd_length(depthProjected) < 0.005 {
-      depthProjected = simd_cross(xAxis, upAxis)
+    var rawNormal = SIMD3<Float>(repeating: 0)
+    for index in input.indices {
+      let current = input[index] - centroid
+      let next = input[(index + 1) % input.count] - centroid
+      rawNormal += simd_cross(current, next)
     }
-    guard simd_length(depthProjected) > 0.0001 else { return nil }
+    guard simd_length(rawNormal) > 0.0001 else { return nil }
 
-    var zAxis = simd_normalize(depthProjected)
-    if simd_dot(simd_cross(xAxis, upAxis), zAxis) < 0 {
-      zAxis = -zAxis
+    var upAxis = simd_normalize(rawNormal)
+    let worldUp = SIMD3<Float>(0, 1, 0)
+    if simd_dot(upAxis, worldUp) < 0 {
+      upAxis = -upAxis
     }
+    let upAlignment = max(min(simd_dot(upAxis, worldUp), 1), -1)
+    let tiltDegrees = acos(Double(upAlignment)) * 180 / Double.pi
+    guard tiltDegrees < 55 else { return nil }
+
+    let projected = input.map { point in
+      point - upAxis * simd_dot(point - centroid, upAxis)
+    }
+    let maximumResidual = zip(input, projected).map { pair in
+      simd_length(pair.0 - pair.1)
+    }.max() ?? 0
+    guard maximumResidual < 0.025 else { return nil }
+
+    var longestEdge = SIMD3<Float>(repeating: 0)
+    var longestLength: Float = 0
+    for index in projected.indices {
+      let edge = projected[(index + 1) % projected.count] - projected[index]
+      let planar = edge - upAxis * simd_dot(edge, upAxis)
+      let length = simd_length(planar)
+      if length > longestLength {
+        longestLength = length
+        longestEdge = planar
+      }
+    }
+    guard longestLength > 0.015 else { return nil }
+
+    var xAxis = simd_normalize(longestEdge)
+    var zAxis = simd_cross(xAxis, upAxis)
+    guard simd_length(zAxis) > 0.0001 else { return nil }
+    zAxis = simd_normalize(zAxis)
     xAxis = simd_normalize(simd_cross(upAxis, zAxis))
 
-    let minX = min(simd_dot(left, xAxis), simd_dot(right, xAxis))
-    let maxX = max(simd_dot(left, xAxis), simd_dot(right, xAxis))
-    let minY = min(simd_dot(bottom, upAxis), simd_dot(top, upAxis))
-    let maxY = max(simd_dot(bottom, upAxis), simd_dot(top, upAxis))
-    let minZ = min(simd_dot(front, zAxis), simd_dot(back, zAxis))
-    let maxZ = max(simd_dot(front, zAxis), simd_dot(back, zAxis))
+    let localUnsorted = projected.map { point -> SIMD2<Float> in
+      let delta = point - centroid
+      return SIMD2<Float>(simd_dot(delta, xAxis), simd_dot(delta, zAxis))
+    }
+    guard let hull = Self.convexHull(localUnsorted), hull.count == 4 else { return nil }
 
+    let minX = hull.map(\.x).min() ?? 0
+    let maxX = hull.map(\.x).max() ?? 0
+    let minZ = hull.map(\.y).min() ?? 0
+    let maxZ = hull.map(\.y).max() ?? 0
     let widthM = maxX - minX
-    let heightM = maxY - minY
     let depthM = maxZ - minZ
-    guard widthM > 0.005, heightM > 0.005, depthM > 0.005 else { return nil }
+    let areaM2 = abs(Self.signedArea(hull))
+    guard widthM > 0.02, depthM > 0.02, areaM2 > 0.0004 else { return nil }
 
-    let centerWorld =
-      xAxis * ((minX + maxX) / 2)
-      + upAxis * ((minY + maxY) / 2)
-      + zAxis * ((minZ + maxZ) / 2)
-    let lowerLeftFrontWorld = xAxis * minX + upAxis * minY + zAxis * minZ
+    let centerX = (minX + maxX) / 2
+    let centerZ = (minZ + maxZ) / 2
+    let groundCenterWorld = centroid + xAxis * centerX + zAxis * centerZ
+    let originWorld = centroid + xAxis * minX + zAxis * minZ
+    let polygonFromOrigin = hull.map { SIMD2<Float>($0.x - minX, $0.y - minZ) }
 
     partBasisWorld = simd_float3x3(xAxis, upAxis, zAxis)
-    objectCenterWorld = centerWorld
-    objectReferenceOriginWorld = lowerLeftFrontWorld
+    objectReferenceOriginWorld = originWorld
+    objectCenterWorld = groundCenterWorld + upAxis * Float(maximumHeightMM / 2000)
+    groundFootprintPolygonXZ = polygonFromOrigin
+    groundFootprintWidthM = widthM
+    groundFootprintDepthM = depthM
+    footprintPaddingM = max(Float(paddingMM / 1000), 0)
+    maximumObjectHeightM = max(Float(maximumHeightMM / 1000), 0.03)
+    groundClearanceM = max(Float(groundClearanceMM / 1000), 0.001)
+    minimumObjectHeightM = max(Float(minimumObjectHeightMM / 1000), 0.003)
+    objectMergeDistanceM = max(Float(mergeDistanceMM / 1000), 0.006)
 
-    let exactHalf = SIMD3<Float>(widthM / 2, heightM / 2, depthM / 2)
-    let paddingM = max(Float(paddingMM / 1000), 0)
-    exactBoxHalfExtentsM = exactHalf
-    sixPointHalfExtentsM = exactHalf + SIMD3<Float>(repeating: paddingM)
-
-    renderBoundingBox(center: centerWorld, halfExtents: exactHalf)
+    renderGroundFootprint(polygon: polygonFromOrigin)
     requestSurfacePreview(force: true)
 
-    return SixPointReferenceSummary(
+    return GroundAreaSummary(
       widthMM: Double(widthM * 1000),
-      heightMM: Double(heightM * 1000),
       depthMM: Double(depthM * 1000),
+      areaMM2: Double(areaM2 * 1_000_000),
+      planeTiltDegrees: tiltDegrees,
       paddingMM: paddingMM
     )
   }
@@ -410,17 +529,16 @@ final class ARScannerController: NSObject, ARSessionDelegate {
   }
 
   @MainActor
-  func makeCroppedObjectMesh(
+  func makeDetectedObjectMesh(
     volumeXMM: Double,
-    volumeYMM: Double,
+    maximumHeightMM: Double,
     volumeZMM: Double
   ) -> TriangleMesh? {
     guard
       let context = makeCropContext(
         volumeXMM: volumeXMM,
-        volumeYMM: volumeYMM,
-        volumeZMM: volumeZMM,
-        useExactSixPointBounds: true
+        maximumHeightMM: maximumHeightMM,
+        volumeZMM: volumeZMM
       )
     else {
       return nil
@@ -428,100 +546,177 @@ final class ARScannerController: NSObject, ARSessionDelegate {
 
     let anchors = anchorQueue.sync { Array(meshAnchors.values) }
     guard !anchors.isEmpty else { return nil }
+    let candidates = Self.collectCandidateTriangles(anchors: anchors, context: context)
+    let isolation = Self.isolateObjectTriangles(candidates, context: context)
+    guard !isolation.triangles.isEmpty else { return nil }
 
     var output = TriangleMesh()
-    for anchor in anchors {
-      Self.appendCropped(anchor: anchor, context: context, into: &output)
+    output.vertices.reserveCapacity(isolation.triangles.count * 3)
+    output.faces.reserveCapacity(isolation.triangles.count)
+
+    for triangle in isolation.triangles {
+      let baseIndex = output.vertices.count
+      output.vertices.append(
+        Vector3D(
+          x: Double(triangle.local0.x) * 1000,
+          y: Double(triangle.local0.y) * 1000,
+          z: Double(triangle.local0.z) * 1000))
+      output.vertices.append(
+        Vector3D(
+          x: Double(triangle.local1.x) * 1000,
+          y: Double(triangle.local1.y) * 1000,
+          z: Double(triangle.local1.z) * 1000))
+      output.vertices.append(
+        Vector3D(
+          x: Double(triangle.local2.x) * 1000,
+          y: Double(triangle.local2.y) * 1000,
+          z: Double(triangle.local2.z) * 1000))
+      output.faces.append(TriangleFace(baseIndex, baseIndex + 1, baseIndex + 2))
     }
     return output
+  }
+
+  /// Compatibility alias used by earlier view-model code.
+  @MainActor
+  func makeCroppedObjectMesh(
+    volumeXMM: Double,
+    volumeYMM: Double,
+    volumeZMM: Double
+  ) -> TriangleMesh? {
+    makeDetectedObjectMesh(
+      volumeXMM: volumeXMM,
+      maximumHeightMM: volumeYMM,
+      volumeZMM: volumeZMM
+    )
   }
 
   @MainActor
   private func makeCropContext(
     volumeXMM: Double,
-    volumeYMM: Double,
-    volumeZMM: Double,
-    useExactSixPointBounds: Bool
+    maximumHeightMM: Double,
+    volumeZMM: Double
   ) -> MeshCropContext? {
-    guard let center = objectCenterWorld else { return nil }
-
-    let manualHalfExtents = SIMD3<Float>(
-      Float(volumeXMM / 2000),
-      Float(volumeYMM / 2000),
-      Float(volumeZMM / 2000)
-    )
-
-    let halfExtents: SIMD3<Float>
-    if useExactSixPointBounds, let exactBoxHalfExtentsM {
-      // A sub-millimeter numerical allowance prevents boundary triangles from being dropped,
-      // while keeping the final STL inside the six-point box rather than the preview margin.
-      halfExtents = exactBoxHalfExtentsM + SIMD3<Float>(repeating: 0.0005)
-    } else {
-      halfExtents = sixPointHalfExtentsM ?? manualHalfExtents
+    if let origin = objectReferenceOriginWorld, groundFootprintPolygonXZ.count >= 3 {
+      return MeshCropContext(
+        referenceOriginWorld: origin,
+        basisWorld: partBasisWorld,
+        footprintPolygonXZ: groundFootprintPolygonXZ,
+        footprintWidthM: groundFootprintWidthM,
+        footprintDepthM: groundFootprintDepthM,
+        footprintPaddingM: footprintPaddingM,
+        maximumHeightM: maximumObjectHeightM,
+        groundClearanceM: groundClearanceM,
+        minimumObjectHeightM: minimumObjectHeightM,
+        mergeDistanceM: objectMergeDistanceM,
+        removeSupportSurface: true
+      )
     }
+
+    guard let center = objectCenterWorld else { return nil }
+    let widthM = max(Float(volumeXMM / 1000), 0.02)
+    let depthM = max(Float(volumeZMM / 1000), 0.02)
+    let heightM = max(Float(maximumHeightMM / 1000), 0.03)
+    let origin = center
+      - partBasisWorld.columns.0 * (widthM / 2)
+      - partBasisWorld.columns.2 * (depthM / 2)
     return MeshCropContext(
-      centerWorld: center,
-      halfExtentsM: halfExtents,
-      referenceOriginWorld: objectReferenceOriginWorld ?? center,
+      referenceOriginWorld: origin,
       basisWorld: partBasisWorld,
-      removeSupportSurface: objectReferenceOriginWorld != nil && sixPointHalfExtentsM != nil,
-      groundRemovalHeightM: groundRemovalHeightM
+      footprintPolygonXZ: [
+        SIMD2<Float>(0, 0),
+        SIMD2<Float>(widthM, 0),
+        SIMD2<Float>(widthM, depthM),
+        SIMD2<Float>(0, depthM),
+      ],
+      footprintWidthM: widthM,
+      footprintDepthM: depthM,
+      footprintPaddingM: 0,
+      maximumHeightM: heightM,
+      groundClearanceM: 0,
+      minimumObjectHeightM: 0.003,
+      mergeDistanceM: objectMergeDistanceM,
+      removeSupportSurface: false
     )
   }
 
-  private static func appendCropped(
-    anchor: ARMeshAnchor,
-    context: MeshCropContext,
-    into output: inout TriangleMesh
-  ) {
-    let geometry = anchor.geometry
-    let transform = anchor.transform
+  private static func collectCandidateTriangles(
+    anchors: [ARMeshAnchor],
+    context: MeshCropContext
+  ) -> [CandidateTriangle] {
+    var output: [CandidateTriangle] = []
+    output.reserveCapacity(20_000)
 
-    for faceIndex in 0..<geometry.faces.count {
-      guard let indices = geometry.triangleIndices(faceIndex: faceIndex) else { continue }
+    for anchor in anchors {
+      let geometry = anchor.geometry
+      let transform = anchor.transform
 
-      let world0 = transform.transformPoint(geometry.vertex(at: indices.0))
-      let world1 = transform.transformPoint(geometry.vertex(at: indices.1))
-      let world2 = transform.transformPoint(geometry.vertex(at: indices.2))
+      for faceIndex in 0..<geometry.faces.count {
+        guard let indices = geometry.triangleIndices(faceIndex: faceIndex) else { continue }
 
-      let crop0 = worldToLocal(world0, center: context.centerWorld, basis: context.basisWorld)
-      let crop1 = worldToLocal(world1, center: context.centerWorld, basis: context.basisWorld)
-      let crop2 = worldToLocal(world2, center: context.centerWorld, basis: context.basisWorld)
+        let world0 = transform.transformPoint(geometry.vertex(at: indices.0))
+        let world1 = transform.transformPoint(geometry.vertex(at: indices.1))
+        let world2 = transform.transformPoint(geometry.vertex(at: indices.2))
 
-      guard isInside(crop0, halfExtents: context.halfExtentsM),
-        isInside(crop1, halfExtents: context.halfExtentsM),
-        isInside(crop2, halfExtents: context.halfExtentsM)
-      else {
-        continue
+        let local0 = worldToLocal(
+          world0, center: context.referenceOriginWorld, basis: context.basisWorld)
+        let local1 = worldToLocal(
+          world1, center: context.referenceOriginWorld, basis: context.basisWorld)
+        let local2 = worldToLocal(
+          world2, center: context.referenceOriginWorld, basis: context.basisWorld)
+        let centroid = (local0 + local1 + local2) / 3
+
+        let centroidXZ = SIMD2<Float>(centroid.x, centroid.z)
+        guard pointInsidePolygon(centroidXZ, polygon: context.footprintPolygonXZ) else {
+          continue
+        }
+
+        let paddedInside = [local0, local1, local2].allSatisfy { point in
+          pointInsideOrNearPolygon(
+            SIMD2<Float>(point.x, point.z),
+            polygon: context.footprintPolygonXZ,
+            margin: context.footprintPaddingM
+          )
+        }
+        guard paddedInside else { continue }
+
+        let minimumY = min(local0.y, min(local1.y, local2.y))
+        let maximumY = max(local0.y, max(local1.y, local2.y))
+        guard centroid.y <= context.maximumHeightM,
+          maximumY <= context.maximumHeightM + max(context.footprintPaddingM, 0.004),
+          minimumY >= -max(context.groundClearanceM * 2, 0.008)
+        else {
+          continue
+        }
+
+        let classification = geometry.classificationOf(faceWithIndex: faceIndex)
+        if shouldRejectSupportTriangle(
+          local0,
+          local1,
+          local2,
+          classification: classification,
+          context: context
+        ) {
+          continue
+        }
+
+        let cross = simd_cross(local1 - local0, local2 - local0)
+        let areaM2 = simd_length(cross) * 0.5
+        guard areaM2 > 0.0000001 else { continue }
+
+        output.append(
+          CandidateTriangle(
+            world0: world0,
+            world1: world1,
+            world2: world2,
+            local0: local0,
+            local1: local1,
+            local2: local2,
+            centroid: centroid,
+            areaM2: areaM2
+          ))
       }
-
-      let ref0 = worldToLocal(
-        world0, center: context.referenceOriginWorld, basis: context.basisWorld)
-      let ref1 = worldToLocal(
-        world1, center: context.referenceOriginWorld, basis: context.basisWorld)
-      let ref2 = worldToLocal(
-        world2, center: context.referenceOriginWorld, basis: context.basisWorld)
-      let classification = geometry.classificationOf(faceWithIndex: faceIndex)
-
-      if shouldRejectSupportTriangle(
-        ref0,
-        ref1,
-        ref2,
-        classification: classification,
-        context: context
-      ) {
-        continue
-      }
-
-      let baseIndex = output.vertices.count
-      output.vertices.append(
-        Vector3D(x: Double(ref0.x) * 1000, y: Double(ref0.y) * 1000, z: Double(ref0.z) * 1000))
-      output.vertices.append(
-        Vector3D(x: Double(ref1.x) * 1000, y: Double(ref1.y) * 1000, z: Double(ref1.z) * 1000))
-      output.vertices.append(
-        Vector3D(x: Double(ref2.x) * 1000, y: Double(ref2.y) * 1000, z: Double(ref2.z) * 1000))
-      output.faces.append(TriangleFace(baseIndex, baseIndex + 1, baseIndex + 2))
     }
+    return output
   }
 
   private static func shouldRejectSupportTriangle(
@@ -535,17 +730,182 @@ final class ARScannerController: NSObject, ARSessionDelegate {
 
     let minY = min(a.y, min(b.y, c.y))
     let maxY = max(a.y, max(b.y, c.y))
-    if maxY < context.groundRemovalHeightM || minY < -context.groundRemovalHeightM {
+    let centroidY = (a.y + b.y + c.y) / 3
+
+    if maxY < context.groundClearanceM || minY < -max(context.groundClearanceM * 2, 0.008) {
       return true
     }
 
     if classification == .floor || classification == .table {
-      let centroidY = (a.y + b.y + c.y) / 3
-      if centroidY < 0.012 {
+      if centroidY < max(context.groundClearanceM * 4, 0.018) {
+        return true
+      }
+    }
+
+    let normal = simd_cross(b - a, c - a)
+    if simd_length(normal) > 0.000001 {
+      let normalized = simd_normalize(normal)
+      let isNearlyHorizontal = abs(normalized.y) > 0.88
+      if isNearlyHorizontal && centroidY < max(context.groundClearanceM * 2.5, 0.010) {
         return true
       }
     }
     return false
+  }
+
+  private static func isolateObjectTriangles(
+    _ candidates: [CandidateTriangle],
+    context: MeshCropContext
+  ) -> (triangles: [CandidateTriangle], componentCount: Int) {
+    guard !candidates.isEmpty else { return ([], 0) }
+    guard candidates.count >= 4 else {
+      return (candidates, candidates.isEmpty ? 0 : 1)
+    }
+
+    var unionFind = UnionFind(count: candidates.count)
+    let tolerance = max(context.mergeDistanceM, 0.008)
+    let cellSize = max(min(tolerance * 0.65, 0.014), 0.005)
+    let neighborRadius = max(Int(ceil(tolerance / cellSize)), 1)
+    let toleranceSquared = tolerance * tolerance
+    var cells: [SpatialKey: [VertexLink]] = [:]
+    cells.reserveCapacity(candidates.count * 2)
+
+    for (triangleIndex, triangle) in candidates.enumerated() {
+      for point in [triangle.local0, triangle.local1, triangle.local2] {
+        let key = spatialKey(for: point, cellSize: cellSize)
+        for dx in -neighborRadius...neighborRadius {
+          for dy in -neighborRadius...neighborRadius {
+            for dz in -neighborRadius...neighborRadius {
+              let neighbor = SpatialKey(x: key.x + dx, y: key.y + dy, z: key.z + dz)
+              guard let links = cells[neighbor] else { continue }
+              for link in links.prefix(16)
+              where simd_length_squared(link.point - point) <= toleranceSquared
+              {
+                unionFind.union(triangleIndex, link.triangleIndex)
+              }
+            }
+          }
+        }
+        if cells[key, default: []].count < 20 {
+          cells[key, default: []].append(VertexLink(triangleIndex: triangleIndex, point: point))
+        }
+      }
+    }
+
+    var grouped: [Int: [Int]] = [:]
+    grouped.reserveCapacity(candidates.count / 3)
+    for index in candidates.indices {
+      grouped[unionFind.find(index), default: []].append(index)
+    }
+
+    var components: [ComponentInfo] = []
+    components.reserveCapacity(grouped.count)
+    for (root, indices) in grouped {
+      var minPoint = SIMD3<Float>(repeating: Float.greatestFiniteMagnitude)
+      var maxPoint = SIMD3<Float>(repeating: -Float.greatestFiniteMagnitude)
+      var area: Float = 0
+      var weightedCentroid = SIMD3<Float>(repeating: 0)
+
+      for index in indices {
+        let triangle = candidates[index]
+        minPoint = simd_min(minPoint, triangle.localMin)
+        maxPoint = simd_max(maxPoint, triangle.localMax)
+        area += triangle.areaM2
+        weightedCentroid += triangle.centroid * triangle.areaM2
+      }
+      let centroid = area > 0 ? weightedCentroid / area : (minPoint + maxPoint) / 2
+      components.append(
+        ComponentInfo(
+          root: root,
+          triangleIndices: indices,
+          surfaceAreaM2: area,
+          minPoint: minPoint,
+          maxPoint: maxPoint,
+          centroid: centroid
+        ))
+    }
+
+    let valid = components.filter { component in
+      component.triangleCount >= 3
+        && component.surfaceAreaM2 > 0.000005
+        && component.maxPoint.y >= context.minimumObjectHeightM
+        && component.heightM >= context.minimumObjectHeightM * 0.45
+    }
+
+    guard !valid.isEmpty else {
+      let totalMin = candidates.reduce(SIMD3<Float>(repeating: Float.greatestFiniteMagnitude)) {
+        simd_min($0, $1.localMin)
+      }
+      let totalMax = candidates.reduce(SIMD3<Float>(repeating: -Float.greatestFiniteMagnitude)) {
+        simd_max($0, $1.localMax)
+      }
+      guard totalMax.y - totalMin.y >= context.minimumObjectHeightM else { return ([], 0) }
+      return (candidates, 1)
+    }
+
+    let footprintCenter = SIMD2<Float>(context.footprintWidthM / 2, context.footprintDepthM / 2)
+    let footprintDiagonal = max(hypot(context.footprintWidthM, context.footprintDepthM), 0.03)
+
+    guard let primary = valid.max(by: { lhs, rhs in
+      componentScore(lhs, footprintCenter: footprintCenter, footprintDiagonal: footprintDiagonal)
+        < componentScore(rhs, footprintCenter: footprintCenter, footprintDiagonal: footprintDiagonal)
+    }) else {
+      return ([], 0)
+    }
+
+    var selectedRoots: Set<Int> = [primary.root]
+    var changed = true
+    while changed {
+      changed = false
+      for component in valid where !selectedRoots.contains(component.root) {
+        let shouldMerge = valid.contains { selected in
+          selectedRoots.contains(selected.root)
+            && componentBoxDistance(component, selected) <= context.mergeDistanceM * 1.5
+        }
+        let meaningful = component.surfaceAreaM2 >= primary.surfaceAreaM2 * 0.008
+          || component.heightM >= context.minimumObjectHeightM
+        if shouldMerge && meaningful {
+          selectedRoots.insert(component.root)
+          changed = true
+        }
+      }
+    }
+
+    let selectedIndices = valid
+      .filter { selectedRoots.contains($0.root) }
+      .flatMap(\.triangleIndices)
+    let selectedSet = Set(selectedIndices)
+    let selectedTriangles = candidates.enumerated().compactMap { index, triangle in
+      selectedSet.contains(index) ? triangle : nil
+    }
+    return (selectedTriangles, selectedRoots.count)
+  }
+
+  private static func componentScore(
+    _ component: ComponentInfo,
+    footprintCenter: SIMD2<Float>,
+    footprintDiagonal: Float
+  ) -> Float {
+    let horizontal = SIMD2<Float>(component.centroid.x, component.centroid.z)
+    let distance = simd_length(horizontal - footprintCenter)
+    let centerWeight = max(0.35, 1 - distance / (footprintDiagonal * 0.8))
+    let heightWeight = 1 + min(component.heightM / 0.10, 2.5)
+    return component.surfaceAreaM2 * heightWeight * centerWeight
+  }
+
+  private static func componentBoxDistance(_ a: ComponentInfo, _ b: ComponentInfo) -> Float {
+    let dx = max(max(a.minPoint.x - b.maxPoint.x, b.minPoint.x - a.maxPoint.x), 0)
+    let dy = max(max(a.minPoint.y - b.maxPoint.y, b.minPoint.y - a.maxPoint.y), 0)
+    let dz = max(max(a.minPoint.z - b.maxPoint.z, b.minPoint.z - a.maxPoint.z), 0)
+    return sqrt(dx * dx + dy * dy + dz * dz)
+  }
+
+  private static func spatialKey(for point: SIMD3<Float>, cellSize: Float) -> SpatialKey {
+    SpatialKey(
+      x: Int(floor(point.x / cellSize)),
+      y: Int(floor(point.y / cellSize)),
+      z: Int(floor(point.z / cellSize))
+    )
   }
 
   private static func worldToLocal(
@@ -561,20 +921,13 @@ final class ARScannerController: NSObject, ARSessionDelegate {
     )
   }
 
-  private static func isInside(_ point: SIMD3<Float>, halfExtents: SIMD3<Float>) -> Bool {
-    abs(point.x) <= halfExtents.x
-      && abs(point.y) <= halfExtents.y
-      && abs(point.z) <= halfExtents.z
-  }
-
   @MainActor
   private func requestSurfacePreview(force: Bool = false) {
     guard
       let context = makeCropContext(
-        volumeXMM: model?.scanVolumeXMM ?? 160,
-        volumeYMM: model?.scanVolumeYMM ?? 160,
-        volumeZMM: model?.scanVolumeZMM ?? 160,
-        useExactSixPointBounds: false
+        volumeXMM: model?.scanVolumeXMM ?? 200,
+        maximumHeightMM: model?.maximumObjectHeightMM ?? 600,
+        volumeZMM: model?.scanVolumeZMM ?? 200
       )
     else {
       return
@@ -609,55 +962,27 @@ final class ARScannerController: NSObject, ARSessionDelegate {
     context: MeshCropContext,
     maxTriangles: Int
   ) -> SurfacePreviewData {
-    var triangles: [(SIMD3<Float>, SIMD3<Float>, SIMD3<Float>)] = []
-    triangles.reserveCapacity(min(maxTriangles * 2, 40_000))
-
-    for anchor in anchors {
-      let geometry = anchor.geometry
-      let transform = anchor.transform
-
-      for faceIndex in 0..<geometry.faces.count {
-        guard let indices = geometry.triangleIndices(faceIndex: faceIndex) else { continue }
-
-        let world0 = transform.transformPoint(geometry.vertex(at: indices.0))
-        let world1 = transform.transformPoint(geometry.vertex(at: indices.1))
-        let world2 = transform.transformPoint(geometry.vertex(at: indices.2))
-
-        let crop0 = worldToLocal(world0, center: context.centerWorld, basis: context.basisWorld)
-        let crop1 = worldToLocal(world1, center: context.centerWorld, basis: context.basisWorld)
-        let crop2 = worldToLocal(world2, center: context.centerWorld, basis: context.basisWorld)
-
-        guard isInside(crop0, halfExtents: context.halfExtentsM),
-          isInside(crop1, halfExtents: context.halfExtentsM),
-          isInside(crop2, halfExtents: context.halfExtentsM)
-        else {
-          continue
-        }
-
-        let ref0 = worldToLocal(
-          world0, center: context.referenceOriginWorld, basis: context.basisWorld)
-        let ref1 = worldToLocal(
-          world1, center: context.referenceOriginWorld, basis: context.basisWorld)
-        let ref2 = worldToLocal(
-          world2, center: context.referenceOriginWorld, basis: context.basisWorld)
-        let classification = geometry.classificationOf(faceWithIndex: faceIndex)
-
-        if shouldRejectSupportTriangle(
-          ref0,
-          ref1,
-          ref2,
-          classification: classification,
-          context: context
-        ) {
-          continue
-        }
-
-        triangles.append((world0, world1, world2))
-      }
-    }
+    let candidates = collectCandidateTriangles(anchors: anchors, context: context)
+    let isolation = isolateObjectTriangles(candidates, context: context)
+    let triangles = isolation.triangles
 
     guard !triangles.isEmpty else {
-      return SurfacePreviewData(positions: [], indices: [], triangleCount: 0)
+      return SurfacePreviewData(
+        positions: [],
+        indices: [],
+        triangleCount: 0,
+        dimensionsMM: nil,
+        componentCount: 0,
+        detectedCenterWorld: nil,
+        detectedHalfExtentsM: nil
+      )
+    }
+
+    var minReference = SIMD3<Float>(repeating: Float.greatestFiniteMagnitude)
+    var maxReference = SIMD3<Float>(repeating: -Float.greatestFiniteMagnitude)
+    for triangle in triangles {
+      minReference = simd_min(minReference, triangle.localMin)
+      maxReference = simd_max(maxReference, triangle.localMax)
     }
 
     let outputCount = min(triangles.count, maxTriangles)
@@ -671,25 +996,59 @@ final class ARScannerController: NSObject, ARSessionDelegate {
       let sourceIndex = min(Int(Double(outputIndex) * step), triangles.count - 1)
       let triangle = triangles[sourceIndex]
       let base = UInt32(positions.count)
-      positions.append(triangle.0)
-      positions.append(triangle.1)
-      positions.append(triangle.2)
+      positions.append(triangle.world0)
+      positions.append(triangle.world1)
+      positions.append(triangle.world2)
       indices.append(base)
       indices.append(base + 1)
       indices.append(base + 2)
     }
 
+    let sizeM = maxReference - minReference
+    let dimensionsMM = SIMD3<Double>(
+      Double(sizeM.x) * 1000,
+      Double(max(maxReference.y, sizeM.y)) * 1000,
+      Double(sizeM.z) * 1000
+    )
+    let centerLocal = (minReference + maxReference) / 2
+    let centerWorld = localToWorld(
+      centerLocal,
+      origin: context.referenceOriginWorld,
+      basis: context.basisWorld
+    )
+
     return SurfacePreviewData(
       positions: positions,
       indices: indices,
-      triangleCount: triangles.count
+      triangleCount: triangles.count,
+      dimensionsMM: dimensionsMM,
+      componentCount: isolation.componentCount,
+      detectedCenterWorld: centerWorld,
+      detectedHalfExtentsM: sizeM / 2
     )
   }
 
   @MainActor
   private func applySurfacePreview(_ data: SurfacePreviewData) {
-    model?.capturedSurfaceTriangleCount = data.triangleCount
+    if let dimensions = data.dimensionsMM {
+      model?.updateLiveMeshDimensions(
+        widthMM: dimensions.x,
+        heightMM: dimensions.y,
+        depthMM: dimensions.z,
+        triangleCount: data.triangleCount,
+        componentCount: data.componentCount
+      )
+    } else {
+      model?.clearLiveMeshDimensions()
+    }
     guard let arView else { return }
+
+    if let center = data.detectedCenterWorld, let half = data.detectedHalfExtentsM {
+      renderDetectedBounds(center: center, halfExtents: half)
+    } else if let detectedBoundsAnchor {
+      arView.scene.removeAnchor(detectedBoundsAnchor)
+      self.detectedBoundsAnchor = nil
+    }
 
     if data.positions.isEmpty {
       capturedSurfaceEntity?.removeFromParent()
@@ -698,12 +1057,12 @@ final class ARScannerController: NSObject, ARSessionDelegate {
     }
 
     do {
-      var descriptor = MeshDescriptor(name: "CapturedObjectSurface")
+      var descriptor = MeshDescriptor(name: "DetectedObjectSurface")
       descriptor.positions = MeshBuffers.Positions(data.positions)
       descriptor.primitives = .triangles(data.indices)
       let mesh = try MeshResource.generate(from: [descriptor])
       let material = SimpleMaterial(
-        color: UIColor.systemTeal.withAlphaComponent(0.48),
+        color: UIColor.systemTeal.withAlphaComponent(0.50),
         isMetallic: false
       )
       let entity = ModelEntity(mesh: mesh, materials: [material])
@@ -722,27 +1081,90 @@ final class ARScannerController: NSObject, ARSessionDelegate {
       anchor.isEnabled = capturedSurfaceVisible
       capturedSurfaceEntity = entity
     } catch {
-      postStatus("Surface preview could not be rendered: \(error.localizedDescription)")
+      postStatus("Object surface preview could not be rendered: \(error.localizedDescription)")
     }
   }
 
   @MainActor
-  private func renderBoundingBox(center: SIMD3<Float>, halfExtents: SIMD3<Float>) {
-    guard let arView else { return }
+  private func renderGroundFootprint(polygon: [SIMD2<Float>]) {
+    guard let arView, let origin = objectReferenceOriginWorld, polygon.count >= 3 else { return }
     if let boundingBoxAnchor {
       arView.scene.removeAnchor(boundingBoxAnchor)
     }
 
     let root = AnchorEntity(world: SIMD3<Float>(0, 0, 0))
     let edgeMaterial = SimpleMaterial(
-      color: UIColor.systemBlue.withAlphaComponent(0.92),
+      color: UIColor.systemBlue.withAlphaComponent(0.95),
       isMetallic: false
     )
     let cornerMaterial = SimpleMaterial(color: .white, isMetallic: false)
-    let thickness = max(
-      min(min(halfExtents.x, min(halfExtents.y, halfExtents.z)) * 0.010, 0.0016),
-      0.0008
+    let thickness: Float = 0.0010
+
+    let worldCorners = polygon.map { point in
+      Self.localToWorld(
+        SIMD3<Float>(point.x, 0.001, point.y),
+        origin: origin,
+        basis: partBasisWorld
+      )
+    }
+
+    for index in worldCorners.indices {
+      let start = worldCorners[index]
+      let end = worldCorners[(index + 1) % worldCorners.count]
+      addLine(
+        from: start,
+        to: end,
+        thickness: thickness,
+        material: edgeMaterial,
+        parent: root
+      )
+    }
+
+    for corner in worldCorners {
+      let dot = ModelEntity(
+        mesh: .generateSphere(radius: 0.0016),
+        materials: [cornerMaterial]
+      )
+      dot.position = corner
+      root.addChild(dot)
+    }
+
+    // A faint fill makes the selected 2D scan area visible without blocking the camera.
+    if worldCorners.count == 4 {
+      do {
+        var descriptor = MeshDescriptor(name: "GroundScanArea")
+        descriptor.positions = MeshBuffers.Positions(worldCorners)
+        descriptor.primitives = .triangles([UInt32(0), 1, 2, 0, 2, 3])
+        let mesh = try MeshResource.generate(from: [descriptor])
+        let fill = SimpleMaterial(
+          color: UIColor.systemBlue.withAlphaComponent(0.08),
+          isMetallic: false
+        )
+        root.addChild(ModelEntity(mesh: mesh, materials: [fill]))
+      } catch {
+        // The outline remains usable even if the optional translucent fill cannot be generated.
+      }
+    }
+
+    root.isEnabled = boundingBoxVisible
+    arView.scene.addAnchor(root)
+    boundingBoxAnchor = root
+  }
+
+  @MainActor
+  private func renderDetectedBounds(center: SIMD3<Float>, halfExtents: SIMD3<Float>) {
+    guard let arView else { return }
+    if let detectedBoundsAnchor {
+      arView.scene.removeAnchor(detectedBoundsAnchor)
+    }
+
+    let root = AnchorEntity(world: SIMD3<Float>(0, 0, 0))
+    let material = SimpleMaterial(
+      color: UIColor.systemGreen.withAlphaComponent(0.90),
+      isMetallic: false
     )
+    let smallest = max(min(halfExtents.x, min(halfExtents.y, halfExtents.z)), 0.005)
+    let thickness = max(smallest * 0.010, 0.0008)
 
     let signs: [Float] = [-1, 1]
     var corners: [SIMD3<Float>] = []
@@ -750,7 +1172,12 @@ final class ARScannerController: NSObject, ARSessionDelegate {
       for sy in signs {
         for sz in signs {
           let local = SIMD3<Float>(sx * halfExtents.x, sy * halfExtents.y, sz * halfExtents.z)
-          corners.append(worldPoint(fromLocal: local, center: center))
+          corners.append(
+            center
+              + partBasisWorld.columns.0 * local.x
+              + partBasisWorld.columns.1 * local.y
+              + partBasisWorld.columns.2 * local.z
+          )
         }
       }
     }
@@ -763,45 +1190,42 @@ final class ARScannerController: NSObject, ARSessionDelegate {
       (4, 5), (4, 6),
       (5, 7), (6, 7),
     ]
-
-    for (startIndex, endIndex) in edgePairs {
-      let start = corners[startIndex]
-      let end = corners[endIndex]
-      let delta = end - start
-      let length = simd_length(delta)
-      guard length > 0.0001 else { continue }
-
-      let edge = ModelEntity(
-        mesh: .generateBox(size: SIMD3<Float>(thickness, length, thickness)),
-        materials: [edgeMaterial]
+    for pair in edgePairs {
+      addLine(
+        from: corners[pair.0],
+        to: corners[pair.1],
+        thickness: thickness,
+        material: material,
+        parent: root
       )
-      edge.position = (start + end) / 2
-      edge.orientation = simd_quatf(
-        from: SIMD3<Float>(0, 1, 0),
-        to: simd_normalize(delta)
-      )
-      root.addChild(edge)
-    }
-
-    for corner in corners {
-      let dot = ModelEntity(
-        mesh: .generateSphere(radius: max(thickness * 1.25, 0.0011)),
-        materials: [cornerMaterial]
-      )
-      dot.position = corner
-      root.addChild(dot)
     }
 
     root.isEnabled = boundingBoxVisible
     arView.scene.addAnchor(root)
-    boundingBoxAnchor = root
+    detectedBoundsAnchor = root
   }
 
-  private func worldPoint(fromLocal local: SIMD3<Float>, center: SIMD3<Float>) -> SIMD3<Float> {
-    center
-      + partBasisWorld.columns.0 * local.x
-      + partBasisWorld.columns.1 * local.y
-      + partBasisWorld.columns.2 * local.z
+  private func addLine(
+    from start: SIMD3<Float>,
+    to end: SIMD3<Float>,
+    thickness: Float,
+    material: SimpleMaterial,
+    parent: Entity
+  ) {
+    let delta = end - start
+    let length = simd_length(delta)
+    guard length > 0.0001 else { return }
+
+    let edge = ModelEntity(
+      mesh: .generateBox(size: SIMD3<Float>(thickness, length, thickness)),
+      materials: [material]
+    )
+    edge.position = (start + end) / 2
+    edge.orientation = simd_quatf(
+      from: SIMD3<Float>(0, 1, 0),
+      to: simd_normalize(delta)
+    )
+    parent.addChild(edge)
   }
 
   @MainActor
@@ -902,6 +1326,119 @@ final class ARScannerController: NSObject, ARSessionDelegate {
     return cameraPosition + simd_normalize(forward) * depth
   }
 
+  private static func convexHull(_ points: [SIMD2<Float>]) -> [SIMD2<Float>]? {
+    let unique = Array(Set(points.map { QuantizedPoint2D($0) })).map(\.point)
+    guard unique.count >= 3 else { return nil }
+    let sorted = unique.sorted {
+      if abs($0.x - $1.x) > 0.000001 { return $0.x < $1.x }
+      return $0.y < $1.y
+    }
+
+    func cross(_ origin: SIMD2<Float>, _ a: SIMD2<Float>, _ b: SIMD2<Float>) -> Float {
+      let oa = a - origin
+      let ob = b - origin
+      return oa.x * ob.y - oa.y * ob.x
+    }
+
+    var lower: [SIMD2<Float>] = []
+    for point in sorted {
+      while lower.count >= 2
+        && cross(lower[lower.count - 2], lower[lower.count - 1], point) <= 0
+      {
+        lower.removeLast()
+      }
+      lower.append(point)
+    }
+
+    var upper: [SIMD2<Float>] = []
+    for point in sorted.reversed() {
+      while upper.count >= 2
+        && cross(upper[upper.count - 2], upper[upper.count - 1], point) <= 0
+      {
+        upper.removeLast()
+      }
+      upper.append(point)
+    }
+
+    lower.removeLast()
+    upper.removeLast()
+    let hull = lower + upper
+    return hull.count >= 3 ? hull : nil
+  }
+
+  private static func signedArea(_ polygon: [SIMD2<Float>]) -> Float {
+    guard polygon.count >= 3 else { return 0 }
+    var area: Float = 0
+    for index in polygon.indices {
+      let current = polygon[index]
+      let next = polygon[(index + 1) % polygon.count]
+      area += current.x * next.y - next.x * current.y
+    }
+    return area * 0.5
+  }
+
+  private static func pointInsidePolygon(
+    _ point: SIMD2<Float>,
+    polygon: [SIMD2<Float>]
+  ) -> Bool {
+    guard polygon.count >= 3 else { return false }
+    var inside = false
+    var previous = polygon.last!
+    for current in polygon {
+      let crosses = (current.y > point.y) != (previous.y > point.y)
+      if crosses {
+        let denominator = previous.y - current.y
+        let safeDenominator = abs(denominator) < 0.0000001 ? 0.0000001 : denominator
+        let intersectionX =
+          (previous.x - current.x) * (point.y - current.y) / safeDenominator + current.x
+        if point.x < intersectionX {
+          inside.toggle()
+        }
+      }
+      previous = current
+    }
+    return inside
+  }
+
+  private static func pointInsideOrNearPolygon(
+    _ point: SIMD2<Float>,
+    polygon: [SIMD2<Float>],
+    margin: Float
+  ) -> Bool {
+    if pointInsidePolygon(point, polygon: polygon) { return true }
+    guard margin > 0 else { return false }
+    var minimumDistance = Float.greatestFiniteMagnitude
+    for index in polygon.indices {
+      let start = polygon[index]
+      let end = polygon[(index + 1) % polygon.count]
+      minimumDistance = min(minimumDistance, distance(point, toSegmentFrom: start, to: end))
+    }
+    return minimumDistance <= margin
+  }
+
+  private static func distance(
+    _ point: SIMD2<Float>,
+    toSegmentFrom start: SIMD2<Float>,
+    to end: SIMD2<Float>
+  ) -> Float {
+    let segment = end - start
+    let lengthSquared = simd_length_squared(segment)
+    guard lengthSquared > 0.0000001 else { return simd_length(point - start) }
+    let t = max(0, min(1, simd_dot(point - start, segment) / lengthSquared))
+    return simd_length(point - (start + segment * t))
+  }
+
+  private static func localToWorld(
+    _ point: SIMD3<Float>,
+    origin: SIMD3<Float>,
+    basis: simd_float3x3
+  ) -> SIMD3<Float> {
+    origin
+      + basis.columns.0 * point.x
+      + basis.columns.1 * point.y
+      + basis.columns.2 * point.z
+  }
+
   private func postStatus(_ message: String) {
     Task { @MainActor [weak model] in
       model?.status = message
@@ -977,6 +1514,27 @@ final class ARScannerController: NSObject, ARSessionDelegate {
         }
       }
     }
+  }
+}
+
+private struct QuantizedPoint2D: Hashable {
+  let qx: Int
+  let qy: Int
+  let point: SIMD2<Float>
+
+  init(_ point: SIMD2<Float>) {
+    self.point = point
+    qx = Int((point.x * 100_000).rounded())
+    qy = Int((point.y * 100_000).rounded())
+  }
+
+  static func == (lhs: QuantizedPoint2D, rhs: QuantizedPoint2D) -> Bool {
+    lhs.qx == rhs.qx && lhs.qy == rhs.qy
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine(qx)
+    hasher.combine(qy)
   }
 }
 

@@ -7,32 +7,84 @@ struct ScanSettingsView: View {
   var body: some View {
     NavigationStack {
       Form {
-        Section("Six-face bounding box") {
+        Section("Four-point ground area") {
           VStack(alignment: .leading, spacing: 8) {
             HStack {
-              Text("Extra capture margin")
+              Text("Footprint edge margin")
               Spacer()
-              Text("\(model.boundingBoxMarginMM, format: .number.precision(.fractionLength(1))) mm")
+              Text("\(model.footprintMarginMM, format: .number.precision(.fractionLength(1))) mm")
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
             }
-            Slider(value: $model.boundingBoxMarginMM, in: 0...15, step: 0.5)
+            Slider(value: $model.footprintMarginMM, in: 0...12, step: 0.5)
+          }
+
+          VStack(alignment: .leading, spacing: 8) {
+            HStack {
+              Text("Maximum object height")
+              Spacer()
+              Text("\(model.maximumObjectHeightMM, format: .number.precision(.fractionLength(0))) mm")
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+            }
+            Slider(value: $model.maximumObjectHeightMM, in: 50...1500, step: 10)
           }
 
           Text(
-            "The blue box uses the exact six captured faces. This small hidden margin helps retain edge triangles when a point is slightly inside the real surface."
+            "The four points define a 2D polygon on the support surface. The app scans upward only to the maximum height. Keep that value just above the expected part height."
+          )
+          .font(.footnote)
+          .foregroundStyle(.secondary)
+        }
+
+        Section("Automatic object isolation") {
+          VStack(alignment: .leading, spacing: 8) {
+            HStack {
+              Text("Ground clearance")
+              Spacer()
+              Text("\(model.groundClearanceMM, format: .number.precision(.fractionLength(1))) mm")
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+            }
+            Slider(value: $model.groundClearanceMM, in: 1...15, step: 0.5)
+          }
+
+          VStack(alignment: .leading, spacing: 8) {
+            HStack {
+              Text("Minimum object height")
+              Spacer()
+              Text("\(model.minimumObjectHeightMM, format: .number.precision(.fractionLength(1))) mm")
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+            }
+            Slider(value: $model.minimumObjectHeightMM, in: 3...50, step: 1)
+          }
+
+          VStack(alignment: .leading, spacing: 8) {
+            HStack {
+              Text("Surface merge distance")
+              Spacer()
+              Text("\(model.objectMergeDistanceMM, format: .number.precision(.fractionLength(0))) mm")
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+            }
+            Slider(value: $model.objectMergeDistanceMM, in: 6...40, step: 1)
+          }
+
+          Text(
+            "The scanner removes floor/table triangles, builds connected surface clusters, selects the strongest object cluster, and merges nearby pieces within this distance. Reduce it when two separate objects are being joined."
           )
           .font(.footnote)
           .foregroundStyle(.secondary)
         }
 
         Section("Surface visualization") {
-          Toggle("Show captured object surface", isOn: $model.showCapturedSurface)
-          Toggle("Show blue bounding box", isOn: $model.showBoundingBox)
+          Toggle("Show detected object surface", isOn: $model.showCapturedSurface)
+          Toggle("Show ground area and object bounds", isOn: $model.showBoundingBox)
           Toggle("Show full-room debug mesh", isOn: $model.showMeshOverlay)
 
           Text(
-            "The teal overlay is the filtered LiDAR surface inside your box. The full-room mesh is only a diagnostic view and is off by default."
+            "The teal overlay is the automatically isolated object surface. The blue outline is the selected ground area. The green wireframe is the detected object's live dimensional extent."
           )
           .font(.footnote)
           .foregroundStyle(.secondary)
@@ -53,7 +105,7 @@ struct ScanSettingsView: View {
           numberField("Y height mm", value: $model.scanVolumeYMM)
           numberField("Z depth mm", value: $model.scanVolumeZMM)
           Text(
-            "These values are used only with Manual Crop Center. A completed six-face box overrides them."
+            "These values are used only with Manual Crop Center. A completed four-point ground area overrides X and Z and uses Maximum Object Height for Y."
           )
           .font(.footnote)
           .foregroundStyle(.secondary)
