@@ -24,10 +24,38 @@ struct SixPointReferenceSummary: Equatable {
   }
 }
 
+struct STLDimensionSummary: Equatable {
+  let widthMM: Double
+  let heightMM: Double
+  let depthMM: Double
+  let referenceWidthMM: Double?
+  let referenceHeightMM: Double?
+  let referenceDepthMM: Double?
+  let vertexCount: Int
+  let triangleCount: Int
+
+  var compactDescription: String {
+    String(format: "STL %.1f × %.1f × %.1f mm", widthMM, heightMM, depthMM)
+  }
+
+  var deltaDescription: String? {
+    guard let referenceWidthMM, let referenceHeightMM, let referenceDepthMM else {
+      return nil
+    }
+    return String(
+      format: "Δ box  W %+.1f  H %+.1f  D %+.1f mm",
+      widthMM - referenceWidthMM,
+      heightMM - referenceHeightMM,
+      depthMM - referenceDepthMM
+    )
+  }
+}
+
 enum ScannerWorkflowPhase: Equatable {
   case definingBox
   case readyToScan
   case scanning
+  case finalizing
   case review
   case exported
 }
@@ -59,6 +87,9 @@ final class ScannerViewModel: ObservableObject {
   @Published var lastReportURL: URL?
   @Published var lastTriangleCount: Int = 0
   @Published var lastVertexCount: Int = 0
+  @Published var lastMeasurementsURL: URL?
+  @Published var stlDimensionSummary: STLDimensionSummary?
+  @Published var isFinalizing: Bool = false
 
   // Six-face bounding box state.
   @Published var referencePoints: [CapturedReferencePoint] = []
@@ -92,6 +123,7 @@ final class ScannerViewModel: ObservableObject {
   ]
 
   var workflowPhase: ScannerWorkflowPhase {
+    if isFinalizing { return .finalizing }
     if lastSTLURL != nil { return .exported }
     if isScanning { return .scanning }
     if sixPointReferenceReady {
@@ -129,11 +161,13 @@ final class ScannerViewModel: ObservableObject {
     case .readyToScan:
       return "Box ready • Start surface scan"
     case .scanning:
-      return "Capturing surface • \(Int(scanCoveragePercent.rounded()))%"
+      return "Capturing selected area • \(Int(scanCoveragePercent.rounded()))%"
+    case .finalizing:
+      return "Building STL and measuring…"
     case .review:
-      return "Surface captured • Review or export"
+      return "Surface captured • Finish and measure"
     case .exported:
-      return "STL and report are ready"
+      return stlDimensionSummary?.compactDescription ?? "STL and report are ready"
     }
   }
 
@@ -228,6 +262,9 @@ final class ScannerViewModel: ObservableObject {
     toleranceResults = []
     lastSTLURL = nil
     lastReportURL = nil
+    lastMeasurementsURL = nil
+    stlDimensionSummary = nil
+    isFinalizing = false
     arController?.clearReferenceVisuals()
   }
 
@@ -255,8 +292,11 @@ final class ScannerViewModel: ObservableObject {
     scanVolumeXMM = summary.widthMM
     scanVolumeYMM = summary.heightMM
     scanVolumeZMM = summary.depthMM
-    status = "Bounding box locked at \(summary.compactDescription). Start the surface scan."
+    status = "Bounding box locked at \(summary.compactDescription). Surface capture started automatically inside this box."
     UINotificationFeedbackGenerator().notificationOccurred(.success)
+
+    // The six points are the complete scan boundary. Start collecting only the mesh inside it immediately.
+    startSurfaceScan()
   }
 
   func startSurfaceScan() {
@@ -275,12 +315,15 @@ final class ScannerViewModel: ObservableObject {
     toleranceResults = []
     lastSTLURL = nil
     lastReportURL = nil
+    lastMeasurementsURL = nil
+    stlDimensionSummary = nil
+    isFinalizing = false
     lastTriangleCount = 0
     lastVertexCount = 0
     scanCoveragePercent = 0
     capturedSurfaceTriangleCount = 0
     arController.beginCapture(resetCoverage: true)
-    status = "Move slowly around the part. The teal overlay is the surface that will be exported."
+    status = "Scanning only inside the six-point box. Move around the part until the teal surface covers every visible side."
     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
   }
 
@@ -292,11 +335,43 @@ final class ScannerViewModel: ObservableObject {
     UIImpactFeedbackGenerator(style: .light).impactOccurred()
   }
 
+  func finishSurfaceScanAndBuildSTL() {
+    guard sixPointReferenceReady else {
+      status = "Capture all six box faces first."
+      return
+    }
+    guard !isFinalizing else { return }
+
+    if isScanning {
+      arController?.endCapture()
+      isScanning = false
+    }
+
+    isFinalizing = true
+    status = "Cropping the selected area, building the STL, and calculating dimensions…"
+    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+
+    Task { @MainActor [weak self] in
+      guard let self else { return }
+      await Task.yield()
+      self.exportCurrentScan()
+      self.isFinalizing = false
+    }
+  }
+
   func resumeSurfaceScan() {
     guard sixPointReferenceReady else { return }
+    lastSTLURL = nil
+    lastReportURL = nil
+    lastMeasurementsURL = nil
+    stlDimensionSummary = nil
+    measurements = []
+    toleranceResults = []
+    lastTriangleCount = 0
+    lastVertexCount = 0
     isScanning = true
     arController?.beginCapture(resetCoverage: false)
-    status = "Surface capture resumed. Fill in missing sides and corners."
+    status = "Surface capture resumed inside the same six-point box. Fill in missing sides and corners."
   }
 
   /// Compatibility for older UI actions.
@@ -338,6 +413,9 @@ final class ScannerViewModel: ObservableObject {
     toleranceResults = []
     lastSTLURL = nil
     lastReportURL = nil
+    lastMeasurementsURL = nil
+    stlDimensionSummary = nil
+    isFinalizing = false
     lastTriangleCount = 0
     lastVertexCount = 0
     scanCoveragePercent = 0
@@ -390,13 +468,18 @@ final class ScannerViewModel: ObservableObject {
       try STLExporter.writeASCII(mesh: mesh, name: "iPhone_scan_\(stamp)", to: stlURL)
 
       var newMeasurements = MeshMeasurementCalculator.measurements(for: mesh)
-      if let summary = sixPointSummary {
+      let calibratedReferenceWidthMM = sixPointSummary.map { $0.widthMM * safeScale }
+      let calibratedReferenceHeightMM = sixPointSummary.map { $0.heightMM * safeScale }
+      let calibratedReferenceDepthMM = sixPointSummary.map { $0.depthMM * safeScale }
+      if let calibratedReferenceWidthMM, let calibratedReferenceHeightMM,
+        let calibratedReferenceDepthMM
+      {
         newMeasurements.append(
-          MeshMeasurement(name: "reference_width_mm", value: summary.widthMM, unit: "mm"))
+          MeshMeasurement(name: "reference_width_mm", value: calibratedReferenceWidthMM, unit: "mm"))
         newMeasurements.append(
-          MeshMeasurement(name: "reference_height_mm", value: summary.heightMM, unit: "mm"))
+          MeshMeasurement(name: "reference_height_mm", value: calibratedReferenceHeightMM, unit: "mm"))
         newMeasurements.append(
-          MeshMeasurement(name: "reference_depth_mm", value: summary.depthMM, unit: "mm"))
+          MeshMeasurement(name: "reference_depth_mm", value: calibratedReferenceDepthMM, unit: "mm"))
       }
       newMeasurements.append(
         MeshMeasurement(name: "scan_coverage_percent", value: scanCoveragePercent, unit: "percent"))
@@ -413,11 +496,30 @@ final class ScannerViewModel: ObservableObject {
       toleranceResults = newResults
       lastSTLURL = stlURL
       lastReportURL = reportURL
+      lastMeasurementsURL = measurementURL
       lastVertexCount = mesh.vertices.count
       lastTriangleCount = mesh.validFaceCount()
-      status = "Export complete: \(lastTriangleCount) triangles."
+
+      if let box = mesh.boundingBox() {
+        stlDimensionSummary = STLDimensionSummary(
+          widthMM: box.size.x,
+          heightMM: box.size.y,
+          depthMM: box.size.z,
+          referenceWidthMM: calibratedReferenceWidthMM,
+          referenceHeightMM: calibratedReferenceHeightMM,
+          referenceDepthMM: calibratedReferenceDepthMM,
+          vertexCount: mesh.vertices.count,
+          triangleCount: mesh.validFaceCount()
+        )
+      } else {
+        stlDimensionSummary = nil
+      }
+
+      status = stlDimensionSummary.map { "STL ready: \($0.compactDescription)." }
+        ?? "STL ready: \(lastTriangleCount) triangles."
       UINotificationFeedbackGenerator().notificationOccurred(.success)
     } catch {
+      stlDimensionSummary = nil
       status = "Export failed: \(error.localizedDescription)"
       UINotificationFeedbackGenerator().notificationOccurred(.error)
     }

@@ -218,6 +218,8 @@ struct ContentView: View {
       readyToScanControls
     case .scanning:
       scanningControls
+    case .finalizing:
+      finalizingControls
     case .review:
       reviewControls
     case .exported:
@@ -313,7 +315,7 @@ struct ContentView: View {
       Button {
         model.startSurfaceScan()
       } label: {
-        Label("Scan Surface", systemImage: "viewfinder")
+        Label("Start Scan", systemImage: "viewfinder")
           .fontWeight(.semibold)
       }
       .buttonStyle(.borderedProminent)
@@ -329,7 +331,7 @@ struct ContentView: View {
         .frame(width: 48, height: 48)
 
       VStack(alignment: .leading, spacing: 2) {
-        Text("Move around every side")
+        Text("Scanning the selected box")
           .font(.subheadline.weight(.semibold))
         Text(
           "\(Int(model.scanCoveragePercent.rounded()))% view coverage • \(model.capturedSurfaceTriangleCount.formatted()) triangles"
@@ -342,16 +344,39 @@ struct ContentView: View {
       Spacer(minLength: 4)
 
       Button {
-        model.stopSurfaceScan()
+        model.finishSurfaceScanAndBuildSTL()
       } label: {
-        Label("Stop", systemImage: "stop.fill")
+        Label("Finish", systemImage: "checkmark.circle.fill")
           .fontWeight(.semibold)
       }
       .buttonStyle(.borderedProminent)
-      .tint(.red)
+      .tint(.blue)
+      .disabled(model.capturedSurfaceTriangleCount == 0)
     }
     .padding(.horizontal, 14)
     .padding(.vertical, 10)
+    .frame(maxWidth: 470)
+    .background(.ultraThinMaterial, in: Capsule())
+  }
+
+  private var finalizingControls: some View {
+    HStack(spacing: 13) {
+      ProgressView()
+        .controlSize(.large)
+
+      VStack(alignment: .leading, spacing: 2) {
+        Text("Building STL")
+          .font(.subheadline.weight(.semibold))
+        Text("Cropping the six-point area and calculating X, Y, and Z dimensions")
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+          .lineLimit(2)
+      }
+
+      Spacer(minLength: 0)
+    }
+    .padding(.horizontal, 14)
+    .padding(.vertical, 11)
     .frame(maxWidth: 470)
     .background(.ultraThinMaterial, in: Capsule())
   }
@@ -381,9 +406,9 @@ struct ContentView: View {
         .buttonStyle(.bordered)
 
         Button {
-          model.exportCurrentScan()
+          model.finishSurfaceScanAndBuildSTL()
         } label: {
-          Label("Export STL", systemImage: "square.and.arrow.up")
+          Label("Finish & Measure", systemImage: "ruler")
             .frame(maxWidth: .infinity)
         }
         .buttonStyle(.borderedProminent)
@@ -401,20 +426,24 @@ struct ContentView: View {
         Image(systemName: "checkmark.circle.fill")
           .foregroundStyle(.green)
         VStack(alignment: .leading, spacing: 2) {
-          Text("Export complete")
+          Text("STL complete")
             .font(.subheadline.weight(.semibold))
-          Text("\(model.lastTriangleCount.formatted()) STL triangles")
+          Text("\(model.lastTriangleCount.formatted()) triangles • exact six-point crop")
             .font(.caption)
             .foregroundStyle(.secondary)
         }
         Spacer()
       }
 
+      if let dimensions = model.stlDimensionSummary {
+        STLDimensionCard(summary: dimensions)
+      }
+
       if !model.toleranceResults.isEmpty {
         ResultSummaryView(results: model.toleranceResults)
       }
 
-      HStack(spacing: 9) {
+      HStack(spacing: 8) {
         if let stlURL = model.lastSTLURL {
           ShareLink(item: stlURL) {
             Label("STL", systemImage: "cube")
@@ -423,21 +452,37 @@ struct ContentView: View {
           .buttonStyle(.borderedProminent)
         }
 
-        if let reportURL = model.lastReportURL {
-          ShareLink(item: reportURL) {
-            Label("CSV", systemImage: "tablecells")
+        if let dimensionsURL = model.lastMeasurementsURL {
+          ShareLink(item: dimensionsURL) {
+            Label("Dims", systemImage: "ruler")
               .frame(maxWidth: .infinity)
           }
-          .buttonStyle(.borderedProminent)
+          .buttonStyle(.bordered)
+        }
+
+        if let reportURL = model.lastReportURL {
+          ShareLink(item: reportURL) {
+            Label("Tol.", systemImage: "checklist")
+              .frame(maxWidth: .infinity)
+          }
+          .buttonStyle(.bordered)
+        }
+      }
+
+      HStack(spacing: 18) {
+        Button {
+          model.resumeSurfaceScan()
+        } label: {
+          Label("Scan More", systemImage: "record.circle")
         }
 
         Button {
           model.resetScan()
         } label: {
-          Label("New", systemImage: "plus")
+          Label("New Scan", systemImage: "plus.circle")
         }
-        .buttonStyle(.bordered)
       }
+      .font(.subheadline.weight(.semibold))
     }
     .padding(12)
     .frame(maxWidth: 430)
@@ -449,6 +494,7 @@ struct ContentView: View {
     case .definingBox: return "plus.viewfinder"
     case .readyToScan: return "cube.transparent"
     case .scanning: return "wave.3.right.circle.fill"
+    case .finalizing: return "gearshape.2.fill"
     case .review: return "eye.circle.fill"
     case .exported: return "checkmark.circle.fill"
     }
@@ -459,6 +505,7 @@ struct ContentView: View {
     case .definingBox: return model.reticleHasSurface ? .cyan : .orange
     case .readyToScan: return .green
     case .scanning: return .cyan
+    case .finalizing: return .blue
     case .review: return .blue
     case .exported: return .green
     }
@@ -519,11 +566,11 @@ private struct ReferenceProgressDots: View {
   let capturedCount: Int
 
   var body: some View {
-    HStack(spacing: 7) {
+    HStack(spacing: 6) {
       ForEach(0..<6, id: \.self) { index in
         Circle()
           .fill(dotColor(index))
-          .frame(width: index == capturedCount ? 10 : 8, height: index == capturedCount ? 10 : 8)
+          .frame(width: index == capturedCount ? 7 : 5, height: index == capturedCount ? 7 : 5)
           .overlay {
             Circle()
               .stroke(.white.opacity(index < capturedCount ? 0.7 : 0.3), lineWidth: 1)
@@ -670,7 +717,7 @@ private struct BoundingBoxHelpView: View {
           }
 
           Label(
-            "After the blue box appears, tap Scan Surface and move around the part. Teal geometry is the LiDAR surface selected for STL export.",
+            "After point 6, scanning starts automatically inside the blue box. Move around the part, then tap Finish to create the STL and display its measured X, Y, and Z dimensions.",
             systemImage: "sparkles"
           )
           .font(.subheadline)
@@ -686,6 +733,55 @@ private struct BoundingBoxHelpView: View {
         }
       }
     }
+  }
+}
+
+private struct STLDimensionCard: View {
+  let summary: STLDimensionSummary
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      HStack {
+        Label("STL dimensions", systemImage: "ruler")
+          .font(.caption.weight(.semibold))
+        Spacer()
+        Text("mm")
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+      }
+
+      HStack(spacing: 8) {
+        dimensionCell(label: "W / X", value: summary.widthMM, tint: .purple)
+        dimensionCell(label: "H / Y", value: summary.heightMM, tint: .orange)
+        dimensionCell(label: "D / Z", value: summary.depthMM, tint: .green)
+      }
+
+      if let delta = summary.deltaDescription {
+        Text(delta)
+          .font(.caption2.monospacedDigit())
+          .foregroundStyle(.secondary)
+          .lineLimit(1)
+      }
+
+      Text("\(summary.vertexCount.formatted()) vertices • \(summary.triangleCount.formatted()) triangles")
+        .font(.caption2.monospacedDigit())
+        .foregroundStyle(.secondary)
+    }
+    .padding(10)
+    .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+  }
+
+  private func dimensionCell(label: String, value: Double, tint: Color) -> some View {
+    VStack(spacing: 2) {
+      Text(label)
+        .font(.caption2.bold())
+        .foregroundStyle(tint)
+      Text(value, format: .number.precision(.fractionLength(1)))
+        .font(.subheadline.monospacedDigit().weight(.semibold))
+    }
+    .frame(maxWidth: .infinity)
+    .padding(.vertical, 7)
+    .background(tint.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
   }
 }
 

@@ -229,9 +229,10 @@ final class ARScannerController: NSObject, ARSessionDelegate {
       .systemGreen,
     ]
     let color = colors.indices.contains(index) ? colors[index] : .white
+    // Keep the six reference points precise without obscuring the surface.
     let sphere = ModelEntity(
-      mesh: .generateSphere(radius: 0.006),
-      materials: [SimpleMaterial(color: color, isMetallic: false)]
+      mesh: .generateSphere(radius: 0.0028),
+      materials: [SimpleMaterial(color: color.withAlphaComponent(0.96), isMetallic: false)]
     )
     let anchor = AnchorEntity(world: point)
     anchor.addChild(sphere)
@@ -418,7 +419,8 @@ final class ARScannerController: NSObject, ARSessionDelegate {
       let context = makeCropContext(
         volumeXMM: volumeXMM,
         volumeYMM: volumeYMM,
-        volumeZMM: volumeZMM
+        volumeZMM: volumeZMM,
+        useExactSixPointBounds: true
       )
     else {
       return nil
@@ -438,16 +440,25 @@ final class ARScannerController: NSObject, ARSessionDelegate {
   private func makeCropContext(
     volumeXMM: Double,
     volumeYMM: Double,
-    volumeZMM: Double
+    volumeZMM: Double,
+    useExactSixPointBounds: Bool
   ) -> MeshCropContext? {
     guard let center = objectCenterWorld else { return nil }
-    let halfExtents =
-      sixPointHalfExtentsM
-      ?? SIMD3<Float>(
-        Float(volumeXMM / 2000),
-        Float(volumeYMM / 2000),
-        Float(volumeZMM / 2000)
-      )
+
+    let manualHalfExtents = SIMD3<Float>(
+      Float(volumeXMM / 2000),
+      Float(volumeYMM / 2000),
+      Float(volumeZMM / 2000)
+    )
+
+    let halfExtents: SIMD3<Float>
+    if useExactSixPointBounds, let exactBoxHalfExtentsM {
+      // A sub-millimeter numerical allowance prevents boundary triangles from being dropped,
+      // while keeping the final STL inside the six-point box rather than the preview margin.
+      halfExtents = exactBoxHalfExtentsM + SIMD3<Float>(repeating: 0.0005)
+    } else {
+      halfExtents = sixPointHalfExtentsM ?? manualHalfExtents
+    }
     return MeshCropContext(
       centerWorld: center,
       halfExtentsM: halfExtents,
@@ -562,7 +573,8 @@ final class ARScannerController: NSObject, ARSessionDelegate {
       let context = makeCropContext(
         volumeXMM: model?.scanVolumeXMM ?? 160,
         volumeYMM: model?.scanVolumeYMM ?? 160,
-        volumeZMM: model?.scanVolumeZMM ?? 160
+        volumeZMM: model?.scanVolumeZMM ?? 160,
+        useExactSixPointBounds: false
       )
     else {
       return
@@ -727,7 +739,10 @@ final class ARScannerController: NSObject, ARSessionDelegate {
       isMetallic: false
     )
     let cornerMaterial = SimpleMaterial(color: .white, isMetallic: false)
-    let thickness = max(min(halfExtents.x, min(halfExtents.y, halfExtents.z)) * 0.018, 0.0015)
+    let thickness = max(
+      min(min(halfExtents.x, min(halfExtents.y, halfExtents.z)) * 0.010, 0.0016),
+      0.0008
+    )
 
     let signs: [Float] = [-1, 1]
     var corners: [SIMD3<Float>] = []
@@ -770,7 +785,7 @@ final class ARScannerController: NSObject, ARSessionDelegate {
 
     for corner in corners {
       let dot = ModelEntity(
-        mesh: .generateSphere(radius: thickness * 1.9),
+        mesh: .generateSphere(radius: max(thickness * 1.25, 0.0011)),
         materials: [cornerMaterial]
       )
       dot.position = corner
